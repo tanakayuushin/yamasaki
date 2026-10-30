@@ -2,7 +2,10 @@
 """
 元の .xlsx に VBA 標準モジュール（.bas）を組み込んで .xlsm を作るツール。
 
-  python3 build_xlsm.py 元ブック.xlsx モジュール.bas 出力.xlsm
+  python3 build_xlsm.py 元ブック.xlsx モジュール.bas 出力.xlsm [実行するSub名 ボタンの文字]
+
+最後の 2 つを指定すると、先頭シートの表の右側（O2 付近）に
+クリックでそのマクロを実行する図形ボタンを置きます。
 
 Excel 本体を使わずに、MS-OVBA 形式の vbaProject.bin（CP932 / 日本語対応）を
 生成し、元の xlsx のシート・書式はそのまま保ったまま追加します。
@@ -369,6 +372,47 @@ def build_vba_project(std_name, std_source, sheet_codenames):
     ]
     return write_cfb(root_children)
 
+# ---------------------------------------------------------------- シート上の実行ボタン
+
+DRAWING_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:twoCellAnchor><xdr:from><xdr:col>{c1}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{r1}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>{c2}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{r2}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:sp macro="[0]!{macro}" textlink=""><xdr:nvSpPr><xdr:cNvPr id="2" name="MacroButton"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm><a:prstGeom prst="roundRect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="2E75B6"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="1F4E79"/></a:solidFill></a:ln></xdr:spPr><xdr:style><a:lnRef idx="2"><a:schemeClr val="accent1"><a:shade val="50000"/></a:schemeClr></a:lnRef><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="0"><a:schemeClr val="accent1"/></a:effectRef><a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></xdr:style><xdr:txBody><a:bodyPr vertOverflow="clip" horzOverflow="clip" rtlCol="0" anchor="ctr"/><a:lstStyle/><a:p><a:pPr algn="ctr"/><a:r><a:rPr kumimoji="1" lang="ja-JP" altLang="en-US" sz="1200" b="1"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:rPr><a:t>{label}</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"""
+
+
+def add_button(zin, names, patched, sheet_file, macro, label, cell_from=(14, 1), cell_to=(17, 4)):
+    """sheet_file に、クリックで macro を実行する図形ボタンを追加する（0 始まりの列・行で位置指定）"""
+    if "<drawing " in patched.get(sheet_file, zin.read(sheet_file).decode("utf-8")):
+        return  # 既に図形があるシートには手を付けない
+    n = 1
+    while "xl/drawings/drawing%d.xml" % n in names or "xl/drawings/drawing%d.xml" % n in patched:
+        n += 1
+    drawing_path = "xl/drawings/drawing%d.xml" % n
+    patched[drawing_path] = DRAWING_XML.format(c1=cell_from[0], r1=cell_from[1], c2=cell_to[0], r2=cell_to[1],
+                                               macro=macro, label=label)
+
+    rels_path = sheet_file.replace("worksheets/", "worksheets/_rels/") + ".rels"
+    if rels_path in names:
+        rels = patched.get(rels_path) or zin.read(rels_path).decode("utf-8")
+    else:
+        rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>'
+    ids = [int(x) for x in re.findall(r'Id="rId(\d+)"', rels)]
+    rid = "rId%d" % (max(ids) + 1 if ids else 1)
+    rels = rels.replace("</Relationships>",
+        '<Relationship Id="%s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing%d.xml"/></Relationships>' % (rid, n))
+    patched[rels_path] = rels
+
+    xml = patched.get(sheet_file) or zin.read(sheet_file).decode("utf-8")
+    tag = '<drawing r:id="%s"/>' % rid
+    for marker in ("<legacyDrawing", "<legacyDrawingHF", "<picture", "<oleObjects", "<controls",
+                   "<webPublishItems", "<tableParts", "<extLst", "</worksheet>"):
+        if marker in xml:
+            xml = xml.replace(marker, tag + marker, 1)
+            break
+    patched[sheet_file] = xml
+
+    ct = patched["[Content_Types].xml"]
+    patched["[Content_Types].xml"] = ct.replace("</Types>",
+        '<Override PartName="/%s" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>' % drawing_path)
+
 # ---------------------------------------------------------------- xlsx → xlsm
 
 def load_bas(path):
@@ -384,7 +428,7 @@ def load_bas(path):
     return name, src
 
 
-def build_xlsm(src_xlsx, bas_path, out_xlsm):
+def build_xlsm(src_xlsx, bas_path, out_xlsm, button_macro=None, button_label=None):
     mod_name, mod_src = load_bas(bas_path)
     zin = zipfile.ZipFile(src_xlsx)
     names = zin.namelist()
@@ -429,22 +473,32 @@ def build_xlsm(src_xlsx, bas_path, out_xlsm):
         '<Relationship Id="%s" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/></Relationships>' % rid)
     patched["xl/_rels/workbook.xml.rels"] = rels
 
+    if button_macro:
+        add_button(zin, names, patched, sheet_files[0], button_macro, button_label or button_macro)
+
     vba_bin = build_vba_project(mod_name, mod_src, codenames)
 
     with zipfile.ZipFile(out_xlsm, "w", zipfile.ZIP_DEFLATED) as zout:
+        written = set()
         for item in zin.infolist():
             data = patched.get(item.filename, None)
             if data is None:
                 zout.writestr(item, zin.read(item.filename))
             else:
                 zout.writestr(item, data.encode("utf-8"))
+            written.add(item.filename)
+        for name, data in patched.items():  # 新規追加したパーツ（drawing など）
+            if name not in written:
+                zout.writestr(name, data.encode("utf-8"))
         zout.writestr("xl/vbaProject.bin", vba_bin)
     return mod_name, codenames
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4:
+    if len(sys.argv) not in (4, 6):
         print(__doc__)
         sys.exit(1)
-    name, cns = build_xlsm(sys.argv[1], sys.argv[2], sys.argv[3])
+    bm = sys.argv[4] if len(sys.argv) == 6 else None
+    bl = sys.argv[5] if len(sys.argv) == 6 else None
+    name, cns = build_xlsm(sys.argv[1], sys.argv[2], sys.argv[3], bm, bl)
     print("作成しました:", sys.argv[3], "モジュール:", name, "シート:", cns)
