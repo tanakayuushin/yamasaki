@@ -107,9 +107,9 @@ Public Sub 業者を1行に集約()
     MarkColumns mode, src, SUM_COLS, 1
     MarkColumns mode, src, JOIN_COLS, 2
 
-    ' key(正規化した業者名) → 出力配列上の行番号
-    Dim dict As Object
-    Set dict = CreateObject("Scripting.Dictionary")
+    ' key(正規化した業者名) → 出力配列上の行番号（Mac 版 Excel でも動くよう Collection を使用）
+    Dim dict As Collection
+    Set dict = New Collection
 
     Dim out() As Variant
     ReDim out(1 To UBound(src, 1), 1 To nCols + 1)
@@ -124,10 +124,10 @@ Public Sub 業者を1行に集約()
             work = Trim$(CStr(src(r, colWork)))
             key = NormalizeKey(company)
 
-            If Not dict.Exists(key) Then
+            If Not CollHas(dict, key) Then
                 '---- 初出：その行を丸ごとコピー ----
                 outCount = outCount + 1
-                dict.Add key, outCount
+                dict.Add outCount, key
                 For c = 1 To nCols
                     out(outCount, c) = src(r, c)
                 Next c
@@ -295,6 +295,14 @@ Private Sub MarkColumns(ByRef mode() As Long, ByRef src As Variant, ByVal names 
         Next c
     Next i
 End Sub
+
+' Collection に指定キーがあるか
+Private Function CollHas(ByVal c As Collection, ByVal k As String) As Boolean
+    On Error Resume Next
+    c.Item k
+    CollHas = (Err.Number = 0)
+    On Error GoTo 0
+End Function
 
 Private Function LastUsedRow(ByVal ws As Worksheet) As Long
     Dim r As Range
