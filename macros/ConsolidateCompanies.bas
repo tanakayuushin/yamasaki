@@ -23,6 +23,7 @@ Option Explicit
 '        この .bas を取り込む（または標準モジュールを追加して本文を貼り付け）
 '     2. 必要なら下の「設定」を書き換える
 '     3. 集約したいシートを開いた状態で Alt + F8 →「業者を1行に集約」を実行
+'        （シート上の「業者を1行に集約」ボタンでも可。結果シートのボタンからも何回でも再実行できる）
 '
 '   元のシートは変更しません。元シートを複製した「集約結果」シートに、
 '   罫線・塗り・列幅などの体裁をそのまま保って書き出します。
@@ -84,10 +85,19 @@ Public Sub 業者を1行に集約()
     Dim wsSrc As Worksheet
     Set wsSrc = ActiveSheet
 
+    ' 結果シート上のボタンから押された場合は、前回の集約元シートを使う（何回でも実行できる）
     If wsSrc.Name = OUTPUT_SHEET Then
-        MsgBox "集約元のシートを開いた状態で実行してください。" & vbCrLf & _
-               "（「" & OUTPUT_SHEET & "」シートは結果用です）", vbExclamation
-        Exit Sub
+        Dim srcName As String
+        srcName = GetSourceSheetName(wsSrc.Parent)
+        If Len(srcName) = 0 Or Not SheetExists(wsSrc.Parent, srcName) Then
+            ' 覚えていなければ、見出し行に「業者」「工種」があるシートを探す
+            srcName = FindSourceSheetByHeaders(wsSrc.Parent)
+        End If
+        If Len(srcName) = 0 Then
+            MsgBox "集約元のシートが分かりません。元のシートを開いた状態で実行してください。", vbExclamation
+            Exit Sub
+        End If
+        Set wsSrc = wsSrc.Parent.Worksheets(srcName)
     End If
 
     '---- 表の範囲を決める（見出し行の最初の文字～最後の文字がある列） ----
@@ -211,16 +221,21 @@ Public Sub 業者を1行に集約()
     On Error GoTo 0
     Application.DisplayAlerts = True
 
+    Dim nBefore As Long
+    nBefore = wb.Worksheets.Count
     wsSrc.Copy After:=wb.Worksheets(wb.Worksheets.Count)
     Dim wsOut As Worksheet
     Set wsOut = wb.Worksheets(wb.Worksheets.Count)
+    If wb.Worksheets.Count = nBefore Or wsOut Is wsSrc Then
+        Application.ScreenUpdating = True
+        MsgBox "シートの複製に失敗したため中止しました。元のシートは変更していません。", vbCritical
+        Exit Sub
+    End If
     wsOut.Name = OUTPUT_SHEET
+    ' ※ 実行ボタンも一緒に複製されるので、結果シートからもそのまま再実行できる
 
-    ' 複製されたボタンなどの図形は不要なので削除
-    Dim shp As Shape
-    For Each shp In wsOut.Shapes
-        shp.Delete
-    Next shp
+    ' 次回、結果シートから実行されたときのために集約元シート名を覚えておく
+    SaveSourceSheetName wb, wsSrc.Name
 
     ' データ行の値だけ消す（書式は残す）
     wsOut.Range(wsOut.Cells(HEADER_ROW + 1, firstCol), wsOut.Cells(lastRow, lastCol)).ClearContents
@@ -533,6 +548,67 @@ Private Sub MarkColumns(ByRef mode() As Long, ByRef src As Variant, ByVal names 
         Next c
     Next i
 End Sub
+
+' 集約元シート名をブック内の非表示の名前に保存／取得する
+Private Const SRC_NAME_KEY As String = "業者集約_元シート"
+
+Private Sub SaveSourceSheetName(ByVal wb As Workbook, ByVal sheetName As String)
+    On Error Resume Next
+    wb.Names(SRC_NAME_KEY).Delete
+    On Error GoTo 0
+    wb.Names.Add Name:=SRC_NAME_KEY, RefersTo:="=" & Chr(34) & sheetName & Chr(34), Visible:=False
+End Sub
+
+Private Function GetSourceSheetName(ByVal wb As Workbook) As String
+    Dim v As String
+    On Error Resume Next
+    v = wb.Names(SRC_NAME_KEY).RefersTo
+    On Error GoTo 0
+    ' ="Sheet1" の形で返るので、= と引用符を外す
+    v = Trim$(v)
+    If Left$(v, 1) = "=" Then v = Mid$(v, 2)
+    If Len(v) >= 2 Then
+        If Left$(v, 1) = Chr(34) And Right$(v, 1) = Chr(34) Then v = Mid$(v, 2, Len(v) - 2)
+    End If
+    GetSourceSheetName = v
+End Function
+
+'  見出し行に業者・工種の列があるシートを探す（結果シート以外で 1 つだけ見つかればその名前、なければ ""）
+Private Function FindSourceSheetByHeaders(ByVal wb As Workbook) As String
+    Dim ws As Worksheet, found As String, n As Long
+    For Each ws In wb.Worksheets
+        If ws.Name <> OUTPUT_SHEET Then
+            If HeaderRowHas(ws, COMPANY_COL) And HeaderRowHas(ws, WORKTYPE_COL) Then
+                found = ws.Name
+                n = n + 1
+            End If
+        End If
+    Next ws
+    If n = 1 Then FindSourceSheetByHeaders = found
+End Function
+
+' 見出し行（HEADER_ROW）に spec と一致するセルがあるか（列記号指定の場合はその列に何か入っているか）
+Private Function HeaderRowHas(ByVal ws As Worksheet, ByVal spec As String) As Boolean
+    Dim c As Long, lastC As Long
+    lastC = ws.Cells(HEADER_ROW, ws.Columns.Count).End(xlToLeft).Column
+    For c = 1 To lastC
+        If Trim$(CStr(ws.Cells(HEADER_ROW, c).Value)) = spec Then
+            HeaderRowHas = True
+            Exit Function
+        End If
+    Next c
+    On Error Resume Next
+    HeaderRowHas = Len(Trim$(CStr(ws.Cells(HEADER_ROW, spec).Value))) > 0
+    On Error GoTo 0
+End Function
+
+Private Function SheetExists(ByVal wb As Workbook, ByVal sheetName As String) As Boolean
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = wb.Worksheets(sheetName)
+    On Error GoTo 0
+    SheetExists = Not ws Is Nothing
+End Function
 
 ' Collection に指定キーがあるか
 Private Function CollHas(ByVal c As Collection, ByVal k As String) As Boolean
