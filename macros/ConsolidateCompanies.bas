@@ -150,11 +150,12 @@ Public Sub 業者を1行に集約()
     Dim outCount As Long
 
     Dim r As Long, c As Long, key As String, idx As Long
-    Dim company As String, work As String
+    Dim company As String, work As String, nDataRows As Long
 
     For r = 2 To UBound(src, 1)
         company = Trim$(CStr(src(r, colCompany)))
         If Len(company) > 0 Then
+            nDataRows = nDataRows + 1
             work = Trim$(CStr(src(r, colWork)))
             key = NormalizeKey(company)
 
@@ -218,16 +219,19 @@ Public Sub 業者を1行に集約()
     Dim wb As Workbook
     Set wb = wsSrc.Parent
 
+    ' 途中でエラーが起きても画面更新や警告表示の設定を元に戻す
+    On Error GoTo Failed
+
     Application.ScreenUpdating = False
     Application.DisplayAlerts = False
     On Error Resume Next
-    wb.Worksheets(OUTPUT_SHEET).Delete
-    On Error GoTo 0
+    wb.Sheets(OUTPUT_SHEET).Delete          ' 前回の結果（グラフシートでも）を消す
+    On Error GoTo Failed
     Application.DisplayAlerts = True
 
     Dim nBefore As Long
     nBefore = wb.Worksheets.Count
-    wsSrc.Copy After:=wb.Worksheets(wb.Worksheets.Count)
+    wsSrc.Copy After:=wb.Sheets(wb.Sheets.Count)
     Dim wsOut As Worksheet
     Set wsOut = wb.Worksheets(wb.Worksheets.Count)
     If wb.Worksheets.Count = nBefore Or wsOut Is wsSrc Then
@@ -241,8 +245,20 @@ Public Sub 業者を1行に集約()
     ' 次回、結果シートから実行されたときのために集約元シート名を覚えておく
     SaveSourceSheetName wb, wsSrc.Name
 
+    ' 元シートでフィルタや行の非表示をしていても、結果はすべて見えるようにする
+    On Error Resume Next
+    If wsOut.FilterMode Then wsOut.ShowAllData
+    On Error GoTo Failed
+    wsOut.Range(wsOut.Rows(HEADER_ROW + 1), wsOut.Rows(lastRow)).Hidden = False
+
     ' データ行の値だけ消す（書式は残す）
     wsOut.Range(wsOut.Cells(HEADER_ROW + 1, firstCol), wsOut.Cells(lastRow, lastCol)).ClearContents
+
+    ' データ行の高さを元の標準的な高さ（元シートのデータ行で最も多い高さ）に揃える
+    '   元シートで折り返し表示のため高くなっていた行が、別の内容になった結果シートに残らないようにする
+    Dim baseHeight As Double
+    baseHeight = TypicalRowHeight(wsSrc, HEADER_ROW + 1, lastRow)
+    If baseHeight > 0 Then wsOut.Range(wsOut.Rows(HEADER_ROW + 1), wsOut.Rows(lastRow)).RowHeight = baseHeight
 
     ' 集約結果を書き込む
     Dim body() As Variant
@@ -269,27 +285,90 @@ Public Sub 業者を1行に集約()
     End If
 
     ' 工種が長くなった行はセル内で折り返す（列幅は変えない）
+    Dim needFit() As Boolean
+    ReDim needFit(1 To outCount)
+    Dim workColWidth As Double
+    workColWidth = wsOut.Columns(firstCol + colWork - 1).ColumnWidth
     If WRAP_WORKTYPE Then
         wsOut.Range(wsOut.Cells(HEADER_ROW + 1, firstCol + colWork - 1), wsOut.Cells(HEADER_ROW + outCount, firstCol + colWork - 1)).WrapText = True
+        For r = 1 To outCount
+            If DisplayWidth(CStr(out(r, colWork))) > workColWidth Then needFit(r) = True
+        Next r
     End If
 
-    ' 内訳列は折り返して、複数行になった行だけ高さを合わせる（列幅は変えない）
+    ' 内訳列は折り返して、複数行になった行は高さを合わせる（列幅は変えない）
     For c = 1 To nCols
         If mode(c) = 3 Then
             wsOut.Range(wsOut.Cells(HEADER_ROW + 1, firstCol + c - 1), wsOut.Cells(HEADER_ROW + outCount, firstCol + c - 1)).WrapText = True
             For r = 1 To outCount
-                If InStr(CStr(out(r, c)), vbLf) > 0 Then wsOut.Rows(HEADER_ROW + r).AutoFit
+                If InStr(CStr(out(r, c)), vbLf) > 0 Then needFit(r) = True
             Next r
         End If
     Next c
+    For r = 1 To outCount
+        If needFit(r) Then wsOut.Rows(HEADER_ROW + r).AutoFit
+    Next r
 
     wsOut.Activate
     wsOut.Cells(HEADER_ROW, firstCol).Select
     Application.ScreenUpdating = True
+    Application.DisplayAlerts = True
 
     MsgBox "集約が完了しました。" & vbCrLf & _
-           "元データ " & (UBound(src, 1) - 1) & " 行 → " & outCount & " 社", vbInformation
+           "元データ " & nDataRows & " 行 → " & outCount & " 社", vbInformation
+    Exit Sub
+
+Failed:
+    Application.ScreenUpdating = True
+    Application.DisplayAlerts = True
+    Application.CutCopyMode = False
+    MsgBox "処理中にエラーが発生しました。" & vbCrLf & _
+           "（" & Err.Number & "：" & Err.Description & "）" & vbCrLf & vbCrLf & _
+           "シートが保護されていないか、「" & OUTPUT_SHEET & "」シートが他で使われていないかを確認してください。", vbCritical
 End Sub
+
+' 指定範囲の行で最も多く使われている行の高さ（データ行の「標準」の高さとみなす）
+Private Function TypicalRowHeight(ByVal ws As Worksheet, ByVal r1 As Long, ByVal r2 As Long) As Double
+    Dim heights As Collection, counts As Collection
+    Set heights = New Collection: Set counts = New Collection
+    Dim r As Long, h As Double, k As String, best As Double, bestN As Long, n As Long
+    If r2 < r1 Then Exit Function
+    If r2 - r1 > 2000 Then r2 = r1 + 2000         ' 行数が多いときは先頭 2000 行で判断
+    For r = r1 To r2
+        h = ws.Rows(r).RowHeight
+        k = CStr(Round(h, 2))
+        n = 0
+        On Error Resume Next
+        n = counts(k)
+        On Error GoTo 0
+        If n = 0 Then
+            heights.Add h, k
+            counts.Add 1, k
+            n = 1
+        Else
+            counts.Remove k
+            counts.Add n + 1, k
+            n = n + 1
+        End If
+        If n > bestN Then bestN = n: best = h
+    Next r
+    TypicalRowHeight = best
+End Function
+
+' 文字列の表示幅のおおよそ（全角 2・半角 1 として数える。列幅との比較用）
+Private Function DisplayWidth(ByVal s As String) As Double
+    Dim i As Long, w As Double, code As Long
+    For i = 1 To Len(s)
+        code = AscW(Mid$(s, i, 1))
+        If code < 0 Then code = code + 65536
+        If code > 255 And Not (code >= &HFF61 And code <= &HFF9F) Then
+            w = w + 2          ' 全角（半角カナを除く）
+        Else
+            w = w + 1
+        End If
+    Next i
+    DisplayWidth = w * 1.05
+End Function
 
 '------------------------------------------------------------------------------
 ' 補助関数
@@ -473,6 +552,13 @@ Private Sub ParseAmount(ByVal item As String, ByRef label As String, ByRef amoun
     Next i
     numText = Replace(Mid$(s, numStart, numEnd - numStart + 1), ",", "")
     If Not IsNumeric(numText) Then Exit Sub
+    ' 「10/25」「3月」「50%」「2回目」のような数字は金額ではないので除外
+    If numStart > 1 Then
+        If Mid$(s, numStart - 1, 1) = "/" Then Exit Sub
+    End If
+    If numEnd < Len(s) Then
+        If InStr("/%月日年時回件名人台", Mid$(s, numEnd + 1, 1)) > 0 Then Exit Sub
+    End If
     If numStart > 1 Then
         If Mid$(s, numStart - 1, 1) = "-" Then numStart = numStart - 1: numText = "-" & numText
     End If
