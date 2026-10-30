@@ -43,16 +43,17 @@ Private Const WORKTYPE_COL As String = "工種"
 ' 工種をつなぐ区切り文字（セル内改行にしたいときは vbLf）
 Private Const DELIMITER As String = "、"
 
-' 工種ごとの内訳として並べる列（見出し名をカンマ区切りで。不要なら ""）
-'   同じ業者に複数の工種があるとき、またはセルの中に項目が 2 つ以上書かれているとき
-'   （改行・「、」・「／」・「;」区切り）、セル内に 1 行ずつ「工種 項目：金額」を並べ、最後に「合計：金額」を付ける
+' 項目ごとの内訳として並べる列（見出し名をカンマ区切りで。不要なら ""）
+'   業者の金額が 2 件以上になるとき（複数の行に分かれている／セルの中に項目が複数書かれている）、
+'   セル内に 1 行ずつ「項目名：金額」（項目名がなければ金額だけ）を並べ、最後に「合計：金額」を付ける。
+'   業者ごとの金額なので工種名は付けない
 Private Const BREAKDOWN_COLS As String = "NET金額（合計）"
 
 ' 内訳の金額の表示形式
 Private Const BREAKDOWN_NUMFMT As String = "#,##0"
 
-' 金額が未入力の工種も内訳に載せる（True なら「工種：未入力」と表示）
-Private Const BREAKDOWN_SHOW_EMPTY As Boolean = True
+' 金額が未入力の行も内訳に「未入力」として載せる
+Private Const BREAKDOWN_SHOW_EMPTY As Boolean = False
 
 ' 単純に数値を合計する列（見出し名をカンマ区切りで。不要なら ""）
 Private Const SUM_COLS As String = ""
@@ -316,15 +317,15 @@ Private Function AppendWorkType(ByVal current As String, ByVal newWork As String
     AppendWorkType = current & DELIMITER & newWork
 End Function
 
-' 「工種(Chr2)セルの内容」(Chr1 区切り) から内訳テキストを作る。
+' 「工種(Chr2)セルの内容」(Chr1 区切り) から内訳テキストを作る（工種名は使わない）。
 '   セルの内容に項目が複数書かれている場合（改行・「、」・「／」・「;」区切り）は項目ごとに分ける。
 '   項目が全部で 1 つだけなら元の値をそのまま返す（数値・表示形式を維持）。
 Private Function BuildBreakdown(ByVal packed As String, ByVal singleVal As Variant) As Variant
     Dim lines() As String, i As Long, j As Long, p As Long
-    Dim work As String, raw As String, parts As Variant
+    Dim raw As String, parts As Variant
     Dim label As String, amount As Double, ok As Boolean
     Dim total As Double, hasAny As Boolean, nItems As Long, nWorks As Long
-    Dim result As String, prefix As String
+    Dim result As String
 
     lines = Split(packed, Chr(1))
     nWorks = UBound(lines) + 1
@@ -340,21 +341,27 @@ Private Function BuildBreakdown(ByVal packed As String, ByVal singleVal As Varia
             nItems = nItems + 1
         End If
     Next i
-    If nItems <= 1 And nWorks <= 1 Then
+    If nItems <= 1 Then
+        ' 金額が 1 件だけ → その値をそのまま返す（数値なら数値のまま。表示形式も元どおり）
         BuildBreakdown = singleVal
+        For i = LBound(lines) To UBound(lines)
+            p = InStr(lines(i), Chr(2))
+            raw = Trim$(Mid$(lines(i), p + 1))
+            If Len(raw) > 0 Then
+                If IsNumeric(raw) Then BuildBreakdown = CDbl(raw) Else BuildBreakdown = raw
+                Exit For
+            End If
+        Next i
         Exit Function
     End If
 
+    ' 業者ごとの金額なので工種名は付けず、項目名（あれば）と金額だけを 1 行ずつ並べる
     For i = LBound(lines) To UBound(lines)
         p = InStr(lines(i), Chr(2))
-        work = Left$(lines(i), p - 1)
         raw = Trim$(Mid$(lines(i), p + 1))
-        If Len(work) = 0 Then work = "（工種なし）"
-        ' 業者の工種が 1 つだけなら工種名の前置きは省く
-        prefix = IIf(nWorks > 1, work, "")
 
         If Len(raw) = 0 Then
-            If BREAKDOWN_SHOW_EMPTY Then result = result & IIf(prefix = "", work, prefix) & "：未入力" & vbLf
+            If BREAKDOWN_SHOW_EMPTY Then result = result & "未入力" & vbLf
         Else
             parts = SplitItems(raw)
             For j = LBound(parts) To UBound(parts)
@@ -362,9 +369,13 @@ Private Function BuildBreakdown(ByVal packed As String, ByVal singleVal As Varia
                 If ok Then
                     total = total + amount
                     hasAny = True
-                    result = result & JoinLabel(prefix, label, work) & "：" & Format(amount, BREAKDOWN_NUMFMT) & vbLf
+                    If Len(label) > 0 Then
+                        result = result & label & "：" & Format(amount, BREAKDOWN_NUMFMT) & vbLf
+                    Else
+                        result = result & Format(amount, BREAKDOWN_NUMFMT) & vbLf
+                    End If
                 Else
-                    result = result & JoinLabel(prefix, "", work) & "：" & Trim$(parts(j)) & vbLf
+                    result = result & Trim$(parts(j)) & vbLf      ' 金額として読めない文言はそのまま
                 End If
             Next j
         End If
@@ -376,19 +387,6 @@ Private Function BuildBreakdown(ByVal packed As String, ByVal singleVal As Varia
         BuildBreakdown = result & "合計：" & Format(total, BREAKDOWN_NUMFMT)
     Else
         BuildBreakdown = Left$(result, Len(result) - 1)
-    End If
-End Function
-
-' 行頭ラベルを組み立てる：「工種 項目」「工種」「項目」のいずれか
-Private Function JoinLabel(ByVal prefix As String, ByVal label As String, ByVal work As String) As String
-    If Len(prefix) > 0 And Len(label) > 0 Then
-        JoinLabel = prefix & " " & label
-    ElseIf Len(label) > 0 Then
-        JoinLabel = label
-    ElseIf Len(prefix) > 0 Then
-        JoinLabel = prefix
-    Else
-        JoinLabel = work
     End If
 End Function
 
