@@ -24,7 +24,8 @@ Option Explicit
 '     2. 必要なら下の「設定」を書き換える
 '     3. 集約したいシートを開いた状態で Alt + F8 →「業者を1行に集約」を実行
 '
-'   元のシートは変更しません。結果は別シートに書き出します。
+'   元のシートは変更しません。元シートを複製した「集約結果」シートに、
+'   罫線・塗り・列幅などの体裁をそのまま保って書き出します。
 '==============================================================================
 
 '---------------------------- 設定（必要なら書き換える） ----------------------
@@ -60,8 +61,11 @@ Private Const DEDUPE_WORKTYPES As Boolean = True
 ' 業者名の表記ゆれ吸収：全角・半角スペースを無視し、英数カナを半角に揃えて比較する
 Private Const NORMALIZE_COMPANY_NAME As Boolean = True
 
-' 結果の末尾に「元の行数」列を追加する
-Private Const ADD_COUNT_COLUMN As Boolean = True
+' 結果の末尾に「元の行数」列を追加する（表の形を一切変えたくない場合は False）
+Private Const ADD_COUNT_COLUMN As Boolean = False
+
+' 結合した工種が列幅に収まらないとき、セル内で折り返す（列幅は変えない）
+Private Const WRAP_WORKTYPE As Boolean = True
 
 '------------------------------------------------------------------------------
 
@@ -166,43 +170,63 @@ Public Sub 業者を1行に集約()
         Exit Sub
     End If
 
-    '---- 書き出し（元の表と同じ列位置から） ----
+    '---- 書き出し：元シートをまるごと複製し、データ行だけ差し替える（罫線・塗り・列幅・印刷設定はそのまま） ----
+    Dim wb As Workbook
+    Set wb = wsSrc.Parent
+
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    On Error Resume Next
+    wb.Worksheets(OUTPUT_SHEET).Delete
+    On Error GoTo 0
+    Application.DisplayAlerts = True
+
+    wsSrc.Copy After:=wb.Worksheets(wb.Worksheets.Count)
     Dim wsOut As Worksheet
-    Set wsOut = GetOrCreateSheet(wsSrc.Parent, OUTPUT_SHEET)
-    wsOut.Cells.Clear
+    Set wsOut = wb.Worksheets(wb.Worksheets.Count)
+    wsOut.Name = OUTPUT_SHEET
 
-    Dim outCols As Long
-    outCols = IIf(ADD_COUNT_COLUMN, nCols + 1, nCols)
+    ' 複製されたボタンなどの図形は不要なので削除
+    Dim shp As Shape
+    For Each shp In wsOut.Shapes
+        shp.Delete
+    Next shp
 
+    ' データ行の値だけ消す（書式は残す）
+    wsOut.Range(wsOut.Cells(HEADER_ROW + 1, firstCol), wsOut.Cells(lastRow, lastCol)).ClearContents
+
+    ' 集約結果を書き込む
     Dim body() As Variant
-    ReDim body(1 To outCount + 1, 1 To outCols)
-    For c = 1 To nCols
-        body(1, c) = src(1, c)
-    Next c
-    If ADD_COUNT_COLUMN Then body(1, nCols + 1) = "元の行数"
+    ReDim body(1 To outCount, 1 To nCols)
     For r = 1 To outCount
-        For c = 1 To outCols
-            body(r + 1, c) = out(r, c)
+        For c = 1 To nCols
+            body(r, c) = out(r, c)
         Next c
     Next r
+    wsOut.Range(wsOut.Cells(HEADER_ROW + 1, firstCol), wsOut.Cells(HEADER_ROW + outCount, lastCol)).Value = body
 
-    With wsOut
-        .Range(.Cells(HEADER_ROW, firstCol), .Cells(HEADER_ROW + outCount, firstCol + outCols - 1)).Value = body
-
-        ' 体裁：見出しの書式と列幅を元シートからコピー
-        wsSrc.Range(wsSrc.Cells(HEADER_ROW, firstCol), wsSrc.Cells(HEADER_ROW, lastCol)).Copy
-        .Cells(HEADER_ROW, firstCol).PasteSpecial xlPasteFormats
+    ' 「元の行数」列（任意）：見出しと各行の書式は隣の列をコピー
+    If ADD_COUNT_COLUMN Then
+        Dim cntCol As Long
+        cntCol = lastCol + 1
+        wsOut.Range(wsOut.Cells(HEADER_ROW, lastCol), wsOut.Cells(HEADER_ROW + outCount, lastCol)).Copy
+        wsOut.Cells(HEADER_ROW, cntCol).PasteSpecial xlPasteFormats
         Application.CutCopyMode = False
-        For c = firstCol To lastCol
-            .Columns(c).ColumnWidth = wsSrc.Columns(c).ColumnWidth
-        Next c
-        .Columns(firstCol + colWork - 1).AutoFit
-        If ADD_COUNT_COLUMN Then .Columns(firstCol + nCols).AutoFit
-        If InStr(DELIMITER, vbLf) > 0 Then .Columns(firstCol + colWork - 1).WrapText = True
+        wsOut.Cells(HEADER_ROW, cntCol).Value = "元の行数"
+        For r = 1 To outCount
+            wsOut.Cells(HEADER_ROW + r, cntCol).Value = out(r, nCols + 1)
+        Next r
+        wsOut.Columns(cntCol).ColumnWidth = 9
+    End If
 
-        .Activate
-        .Cells(HEADER_ROW, firstCol).Select
-    End With
+    ' 工種が長くなった行はセル内で折り返す（列幅は変えない）
+    If WRAP_WORKTYPE Then
+        wsOut.Range(wsOut.Cells(HEADER_ROW + 1, firstCol + colWork - 1), wsOut.Cells(HEADER_ROW + outCount, firstCol + colWork - 1)).WrapText = True
+    End If
+
+    wsOut.Activate
+    wsOut.Cells(HEADER_ROW, firstCol).Select
+    Application.ScreenUpdating = True
 
     MsgBox "集約が完了しました。" & vbCrLf & _
            "元データ " & (UBound(src, 1) - 1) & " 行 → " & outCount & " 社", vbInformation
