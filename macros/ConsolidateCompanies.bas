@@ -43,7 +43,8 @@ Private Const WORKTYPE_COL As String = "工種"
 Private Const DELIMITER As String = "、"
 
 ' 工種ごとの内訳として並べる列（見出し名をカンマ区切りで。不要なら ""）
-'   同じ業者に複数の工種があるとき、セル内に 1 行ずつ「工種：金額」を並べ、最後に「合計：金額」を付ける
+'   同じ業者に複数の工種があるとき、またはセルの中に項目が 2 つ以上書かれているとき
+'   （改行・「、」・「／」・「;」区切り）、セル内に 1 行ずつ「工種 項目：金額」を並べ、最後に「合計：金額」を付ける
 Private Const BREAKDOWN_COLS As String = "NET金額（合計）"
 
 ' 内訳の金額の表示形式
@@ -122,7 +123,7 @@ Public Sub 業者を1行に集約()
     MarkColumns mode, src, JOIN_COLS, 2
     MarkColumns mode, src, BREAKDOWN_COLS, 3
 
-    ' 内訳列用：行ごと・列ごとに「工種|金額」を vbLf 区切りで溜めておく
+    ' 内訳列用：行ごと・列ごとに「工種(Chr2)セルの内容」を Chr(1) 区切りで溜めておく（セル内改行と衝突しないよう制御文字を使う）
     Dim items() As String
     ReDim items(1 To UBound(src, 1), 1 To nCols)
 
@@ -154,7 +155,7 @@ Public Sub 業者を1行に集約()
                 out(outCount, colWork) = work
                 out(outCount, nCols + 1) = 1
                 For c = 1 To nCols
-                    If mode(c) = 3 Then items(outCount, c) = work & "|" & CStr(src(r, c))
+                    If mode(c) = 3 Then items(outCount, c) = work & Chr(2) & CStr(src(r, c))
                 Next c
             Else
                 '---- 既出：工種を結合、他の列は設定どおりに統合 ----
@@ -174,7 +175,7 @@ Public Sub 業者を1行に集約()
                             Case 2   ' 文字列結合（同じ文言は 1 回だけ）
                                 out(idx, c) = JoinText(CStr(out(idx, c)), CStr(src(r, c)))
                             Case 3   ' 工種ごとの内訳
-                                items(idx, c) = items(idx, c) & vbLf & work & "|" & CStr(src(r, c))
+                                items(idx, c) = items(idx, c) & Chr(1) & work & Chr(2) & CStr(src(r, c))
                             Case Else ' 初出優先、空欄なら補完
                                 If Len(Trim$(CStr(out(idx, c)))) = 0 Then out(idx, c) = src(r, c)
                         End Select
@@ -300,32 +301,57 @@ Private Function AppendWorkType(ByVal current As String, ByVal newWork As String
     AppendWorkType = current & DELIMITER & newWork
 End Function
 
-' 「工種|金額」(vbLf 区切り) から内訳テキストを作る。1 件だけなら元の値をそのまま返す
-Private Function BuildBreakdown(ByVal packed As String, ByVal single As Variant) As Variant
-    Dim lines() As String, i As Long, p As Long
-    Dim work As String, amt As String, total As Double, n As Long, hasAny As Boolean
-    Dim result As String
+' 「工種(Chr2)セルの内容」(Chr1 区切り) から内訳テキストを作る。
+'   セルの内容に項目が複数書かれている場合（改行・「、」・「／」・「;」区切り）は項目ごとに分ける。
+'   項目が全部で 1 つだけなら元の値をそのまま返す（数値・表示形式を維持）。
+Private Function BuildBreakdown(ByVal packed As String, ByVal singleVal As Variant) As Variant
+    Dim lines() As String, i As Long, j As Long, p As Long
+    Dim work As String, raw As String, parts As Variant
+    Dim label As String, amount As Double, ok As Boolean
+    Dim total As Double, hasAny As Boolean, nItems As Long, nWorks As Long
+    Dim result As String, prefix As String
 
-    lines = Split(packed, vbLf)
-    If UBound(lines) < 1 Then
-        BuildBreakdown = single     ' 工種が 1 つだけ → 数値のまま（表示形式も元どおり）
+    lines = Split(packed, Chr(1))
+    nWorks = UBound(lines) + 1
+
+    ' 項目の総数を数える（1 つだけならそのまま）
+    For i = LBound(lines) To UBound(lines)
+        p = InStr(lines(i), Chr(2))
+        raw = Trim$(Mid$(lines(i), p + 1))
+        If Len(raw) > 0 Then
+            parts = SplitItems(raw)
+            nItems = nItems + UBound(parts) + 1
+        ElseIf BREAKDOWN_SHOW_EMPTY Then
+            nItems = nItems + 1
+        End If
+    Next i
+    If nItems <= 1 And nWorks <= 1 Then
+        BuildBreakdown = singleVal
         Exit Function
     End If
 
     For i = LBound(lines) To UBound(lines)
-        p = InStr(lines(i), "|")
+        p = InStr(lines(i), Chr(2))
         work = Left$(lines(i), p - 1)
-        amt = Trim$(Mid$(lines(i), p + 1))
+        raw = Trim$(Mid$(lines(i), p + 1))
         If Len(work) = 0 Then work = "（工種なし）"
-        If Len(amt) > 0 And IsNumeric(amt) Then
-            total = total + CDbl(amt)
-            n = n + 1
-            hasAny = True
-            result = result & work & "：" & Format(CDbl(amt), BREAKDOWN_NUMFMT) & vbLf
-        ElseIf Len(amt) > 0 Then
-            result = result & work & "：" & amt & vbLf           ' 数値でない文言はそのまま
-        ElseIf BREAKDOWN_SHOW_EMPTY Then
-            result = result & work & "：未入力" & vbLf
+        ' 業者の工種が 1 つだけなら工種名の前置きは省く
+        prefix = IIf(nWorks > 1, work, "")
+
+        If Len(raw) = 0 Then
+            If BREAKDOWN_SHOW_EMPTY Then result = result & IIf(prefix = "", work, prefix) & "：未入力" & vbLf
+        Else
+            parts = SplitItems(raw)
+            For j = LBound(parts) To UBound(parts)
+                ParseAmount parts(j), label, amount, ok
+                If ok Then
+                    total = total + amount
+                    hasAny = True
+                    result = result & JoinLabel(prefix, label, work) & "：" & Format(amount, BREAKDOWN_NUMFMT) & vbLf
+                Else
+                    result = result & JoinLabel(prefix, "", work) & "：" & Trim$(parts(j)) & vbLf
+                End If
+            Next j
         End If
     Next i
 
@@ -337,6 +363,117 @@ Private Function BuildBreakdown(ByVal packed As String, ByVal single As Variant)
         BuildBreakdown = Left$(result, Len(result) - 1)
     End If
 End Function
+
+' 行頭ラベルを組み立てる：「工種 項目」「工種」「項目」のいずれか
+Private Function JoinLabel(ByVal prefix As String, ByVal label As String, ByVal work As String) As String
+    If Len(prefix) > 0 And Len(label) > 0 Then
+        JoinLabel = prefix & " " & label
+    ElseIf Len(label) > 0 Then
+        JoinLabel = label
+    ElseIf Len(prefix) > 0 Then
+        JoinLabel = prefix
+    Else
+        JoinLabel = work
+    End If
+End Function
+
+' セル内の複数項目を分割する。区切り：改行・「、」・「，」・「／」「/」・「;」「；」・
+' 半角カンマ（ただし 1,250,000 のような桁区切りは分割しない）
+Private Function SplitItems(ByVal raw As String) As Variant
+    Dim buf As String, ch As String, i As Long, out As String
+    buf = Replace(raw, vbCrLf, vbLf)
+    buf = Replace(buf, vbCr, vbLf)
+    For i = 1 To Len(buf)
+        ch = Mid$(buf, i, 1)
+        Select Case ch
+            Case vbLf, "、", "，", "／", "/", ";", "；"
+                out = out & Chr(3)
+            Case ","
+                If i > 1 And i + 3 <= Len(buf) Then
+                    If IsDigitChar(Mid$(buf, i - 1, 1)) And IsDigitChar(Mid$(buf, i + 1, 1)) _
+                       And IsDigitChar(Mid$(buf, i + 2, 1)) And IsDigitChar(Mid$(buf, i + 3, 1)) Then
+                        out = out & ch        ' 桁区切り
+                    Else
+                        out = out & Chr(3)
+                    End If
+                Else
+                    out = out & Chr(3)
+                End If
+            Case Else
+                out = out & ch
+        End Select
+    Next i
+    ' 空の要素を除く
+    Dim parts() As String, keep() As String, n As Long
+    parts = Split(out, Chr(3))
+    ReDim keep(0 To UBound(parts))
+    For i = LBound(parts) To UBound(parts)
+        If Len(Trim$(parts(i))) > 0 Then
+            keep(n) = Trim$(parts(i))
+            n = n + 1
+        End If
+    Next i
+    If n = 0 Then
+        ReDim keep(0 To 0)
+        keep(0) = Trim$(raw)
+    Else
+        ReDim Preserve keep(0 To n - 1)
+    End If
+    SplitItems = keep
+End Function
+
+Private Function IsDigitChar(ByVal ch As String) As Boolean
+    IsDigitChar = (ch >= "0" And ch <= "9")
+End Function
+
+' 「基礎工事 800,000」「￥450,000」「外構：450000円」などから項目名と金額を取り出す
+Private Sub ParseAmount(ByVal item As String, ByRef label As String, ByRef amount As Double, ByRef ok As Boolean)
+    Dim s As String, i As Long, ch As String, numEnd As Long, numStart As Long, numText As String
+    s = StrConv(Trim$(item), vbNarrow)          ' 全角数字・記号を半角に
+    s = Replace(s, "円", "")
+    s = Replace(s, "￥", "")
+    s = Replace(s, ChrW(&HA5), "")   ' 半角の円記号
+    s = Replace(s, "\", "")
+    s = Trim$(s)
+    ok = False
+    label = ""
+    ' 末尾側にある数字列（カンマ・小数点込み）を探す
+    numEnd = 0
+    For i = Len(s) To 1 Step -1
+        If IsDigitChar(Mid$(s, i, 1)) Then
+            numEnd = i
+            Exit For
+        End If
+    Next i
+    If numEnd = 0 Then Exit Sub
+    numStart = numEnd
+    For i = numEnd - 1 To 1 Step -1
+        ch = Mid$(s, i, 1)
+        If IsDigitChar(ch) Or ch = "," Or ch = "." Then
+            numStart = i
+        Else
+            Exit For
+        End If
+    Next i
+    numText = Replace(Mid$(s, numStart, numEnd - numStart + 1), ",", "")
+    If Not IsNumeric(numText) Then Exit Sub
+    If numStart > 1 Then
+        If Mid$(s, numStart - 1, 1) = "-" Then numStart = numStart - 1: numText = "-" & numText
+    End If
+    amount = CDbl(numText)
+    ok = True
+    label = Trim$(Left$(s, numStart - 1))
+    ' 「：」「:」「=」などの末尾記号を落とす
+    Do While Len(label) > 0 And InStr("：:=＝ 　", Right$(label, 1)) > 0
+        label = Left$(label, Len(label) - 1)
+    Loop
+    ' 数字の後ろに残った文言（例「(税抜)」）はラベルに付ける
+    If numEnd < Len(s) Then
+        Dim tail As String
+        tail = Trim$(Mid$(s, numEnd + 1))
+        If Len(tail) > 0 Then label = Trim$(label & " " & tail)
+    End If
+End Sub
 
 ' 備考などの文字列列を結合（同じ文言は追加しない）
 Private Function JoinText(ByVal current As String, ByVal newText As String) As String
