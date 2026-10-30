@@ -80,6 +80,9 @@ Private Const ADD_COUNT_COLUMN As Boolean = False
 ' 結合した工種が列幅に収まらないとき、セル内で折り返す（列幅は変えない）
 Private Const WRAP_WORKTYPE As Boolean = True
 
+' （内部用）結果シートから再実行するときに集約元シート名を覚えておく名前
+Private Const SRC_NAME_KEY As String = "業者集約_元シート"
+
 '------------------------------------------------------------------------------
 
 Public Sub 業者を1行に集約()
@@ -548,8 +551,6 @@ Private Sub MarkColumns(ByRef mode() As Long, ByRef src As Variant, ByVal names 
 End Sub
 
 ' 集約元シート名をブック内の非表示の名前に保存／取得する
-Private Const SRC_NAME_KEY As String = "業者集約_元シート"
-
 Private Sub SaveSourceSheetName(ByVal wb As Workbook, ByVal sheetName As String)
     On Error Resume Next
     wb.Names(SRC_NAME_KEY).Delete
@@ -635,16 +636,4 @@ End Function
 
 Private Function LastUsedCol(ByVal ws As Worksheet, ByVal headerRow As Long) As Long
     LastUsedCol = ws.Cells(headerRow, ws.Columns.Count).End(xlToLeft).Column
-End Function
-
-Private Function GetOrCreateSheet(ByVal wb As Workbook, ByVal name As String) As Worksheet
-    Dim ws As Worksheet
-    On Error Resume Next
-    Set ws = wb.Worksheets(name)
-    On Error GoTo 0
-    If ws Is Nothing Then
-        Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
-        ws.Name = name
-    End If
-    Set GetOrCreateSheet = ws
 End Function
