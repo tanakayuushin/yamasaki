@@ -401,7 +401,7 @@ def add_button(zin, names, patched, sheet_file, macro, label, cell_from=(14, 1),
     patched[rels_path] = rels
 
     xml = patched.get(sheet_file) or zin.read(sheet_file).decode("utf-8")
-    tag = '<drawing r:id="%s"/>' % rid
+    tag = '<drawing xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="%s"/>' % rid
     for marker in ("<legacyDrawing", "<legacyDrawingHF", "<picture", "<oleObjects", "<controls",
                    "<webPublishItems", "<tableParts", "<extLst", "</worksheet>"):
         if marker in xml:
