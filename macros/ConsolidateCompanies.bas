@@ -42,8 +42,18 @@ Private Const WORKTYPE_COL As String = "工種"
 ' 工種をつなぐ区切り文字（セル内改行にしたいときは vbLf）
 Private Const DELIMITER As String = "、"
 
-' 数値として合計する列（見出し名をカンマ区切りで。不要なら ""）
-Private Const SUM_COLS As String = "NET金額（合計）"
+' 工種ごとの内訳として並べる列（見出し名をカンマ区切りで。不要なら ""）
+'   同じ業者に複数の工種があるとき、セル内に 1 行ずつ「工種：金額」を並べ、最後に「合計：金額」を付ける
+Private Const BREAKDOWN_COLS As String = "NET金額（合計）"
+
+' 内訳の金額の表示形式
+Private Const BREAKDOWN_NUMFMT As String = "#,##0"
+
+' 金額が未入力の工種も内訳に載せる（True なら「工種：未入力」と表示）
+Private Const BREAKDOWN_SHOW_EMPTY As Boolean = True
+
+' 単純に数値を合計する列（見出し名をカンマ区切りで。不要なら ""）
+Private Const SUM_COLS As String = ""
 
 ' 文字列を結合する列（見出し名をカンマ区切りで。不要なら ""）
 '   ※ ここに無い列は「最初に出てきた行の値」を使い、空欄なら後の行で補う
@@ -105,11 +115,16 @@ Public Sub 業者を1行に集約()
         Exit Sub
     End If
 
-    ' 列ごとの扱い: 0=初出優先(空欄なら補完) 1=数値合計 2=文字列結合
+    ' 列ごとの扱い: 0=初出優先(空欄なら補完) 1=数値合計 2=文字列結合 3=工種ごとの内訳
     Dim mode() As Long
     ReDim mode(1 To nCols)
     MarkColumns mode, src, SUM_COLS, 1
     MarkColumns mode, src, JOIN_COLS, 2
+    MarkColumns mode, src, BREAKDOWN_COLS, 3
+
+    ' 内訳列用：行ごと・列ごとに「工種|金額」を vbLf 区切りで溜めておく
+    Dim items() As String
+    ReDim items(1 To UBound(src, 1), 1 To nCols)
 
     ' key(正規化した業者名) → 出力配列上の行番号（Mac 版 Excel でも動くよう Collection を使用）
     Dim dict As Collection
@@ -138,6 +153,9 @@ Public Sub 業者を1行に集約()
                 out(outCount, colCompany) = company
                 out(outCount, colWork) = work
                 out(outCount, nCols + 1) = 1
+                For c = 1 To nCols
+                    If mode(c) = 3 Then items(outCount, c) = work & "|" & CStr(src(r, c))
+                Next c
             Else
                 '---- 既出：工種を結合、他の列は設定どおりに統合 ----
                 idx = dict(key)
@@ -155,6 +173,8 @@ Public Sub 業者を1行に集約()
                                 End If
                             Case 2   ' 文字列結合（同じ文言は 1 回だけ）
                                 out(idx, c) = JoinText(CStr(out(idx, c)), CStr(src(r, c)))
+                            Case 3   ' 工種ごとの内訳
+                                items(idx, c) = items(idx, c) & vbLf & work & "|" & CStr(src(r, c))
                             Case Else ' 初出優先、空欄なら補完
                                 If Len(Trim$(CStr(out(idx, c)))) = 0 Then out(idx, c) = src(r, c)
                         End Select
@@ -169,6 +189,15 @@ Public Sub 業者を1行に集約()
         MsgBox "業者名が入力された行がありません。", vbExclamation
         Exit Sub
     End If
+
+    '---- 内訳列：2 件以上ある業者は「工種：金額」を 1 行ずつ並べ、最後に合計を付ける ----
+    For c = 1 To nCols
+        If mode(c) = 3 Then
+            For r = 1 To outCount
+                out(r, c) = BuildBreakdown(items(r, c), out(r, c))
+            Next r
+        End If
+    Next c
 
     '---- 書き出し：元シートをまるごと複製し、データ行だけ差し替える（罫線・塗り・列幅・印刷設定はそのまま） ----
     Dim wb As Workbook
@@ -224,6 +253,16 @@ Public Sub 業者を1行に集約()
         wsOut.Range(wsOut.Cells(HEADER_ROW + 1, firstCol + colWork - 1), wsOut.Cells(HEADER_ROW + outCount, firstCol + colWork - 1)).WrapText = True
     End If
 
+    ' 内訳列は折り返して、複数行になった行だけ高さを合わせる（列幅は変えない）
+    For c = 1 To nCols
+        If mode(c) = 3 Then
+            wsOut.Range(wsOut.Cells(HEADER_ROW + 1, firstCol + c - 1), wsOut.Cells(HEADER_ROW + outCount, firstCol + c - 1)).WrapText = True
+            For r = 1 To outCount
+                If InStr(CStr(out(r, c)), vbLf) > 0 Then wsOut.Rows(HEADER_ROW + r).AutoFit
+            Next r
+        End If
+    Next c
+
     wsOut.Activate
     wsOut.Cells(HEADER_ROW, firstCol).Select
     Application.ScreenUpdating = True
@@ -259,6 +298,44 @@ Private Function AppendWorkType(ByVal current As String, ByVal newWork As String
     End If
 
     AppendWorkType = current & DELIMITER & newWork
+End Function
+
+' 「工種|金額」(vbLf 区切り) から内訳テキストを作る。1 件だけなら元の値をそのまま返す
+Private Function BuildBreakdown(ByVal packed As String, ByVal single As Variant) As Variant
+    Dim lines() As String, i As Long, p As Long
+    Dim work As String, amt As String, total As Double, n As Long, hasAny As Boolean
+    Dim result As String
+
+    lines = Split(packed, vbLf)
+    If UBound(lines) < 1 Then
+        BuildBreakdown = single     ' 工種が 1 つだけ → 数値のまま（表示形式も元どおり）
+        Exit Function
+    End If
+
+    For i = LBound(lines) To UBound(lines)
+        p = InStr(lines(i), "|")
+        work = Left$(lines(i), p - 1)
+        amt = Trim$(Mid$(lines(i), p + 1))
+        If Len(work) = 0 Then work = "（工種なし）"
+        If Len(amt) > 0 And IsNumeric(amt) Then
+            total = total + CDbl(amt)
+            n = n + 1
+            hasAny = True
+            result = result & work & "：" & Format(CDbl(amt), BREAKDOWN_NUMFMT) & vbLf
+        ElseIf Len(amt) > 0 Then
+            result = result & work & "：" & amt & vbLf           ' 数値でない文言はそのまま
+        ElseIf BREAKDOWN_SHOW_EMPTY Then
+            result = result & work & "：未入力" & vbLf
+        End If
+    Next i
+
+    If Len(result) = 0 Then
+        BuildBreakdown = Empty
+    ElseIf hasAny Then
+        BuildBreakdown = result & "合計：" & Format(total, BREAKDOWN_NUMFMT)
+    Else
+        BuildBreakdown = Left$(result, Len(result) - 1)
+    End If
 End Function
 
 ' 備考などの文字列列を結合（同じ文言は追加しない）
