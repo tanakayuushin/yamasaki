@@ -87,6 +87,10 @@ Private Const SRC_NAME_KEY As String = "業者集約_元シート"
 
 Public Sub 業者を1行に集約()
     Dim wsSrc As Worksheet
+    If TypeName(ActiveSheet) <> "Worksheet" Then
+        MsgBox "集約したい表のあるシートを開いた状態で実行してください。", vbExclamation
+        Exit Sub
+    End If
     Set wsSrc = ActiveSheet
 
     ' 結果シート上のボタンから押された場合は、前回の集約元シートを使う（何回でも実行できる）
@@ -108,27 +112,47 @@ Public Sub 業者を1行に集約()
     Dim firstCol As Long, lastCol As Long, lastRow As Long
     firstCol = FirstUsedCol(wsSrc, HEADER_ROW)
     lastCol = LastUsedCol(wsSrc, HEADER_ROW)
-    lastRow = LastUsedRow(wsSrc)
-    If firstCol = 0 Or lastRow <= HEADER_ROW Then
-        MsgBox "見出し行（" & HEADER_ROW & " 行目）またはデータ行が見つかりません。", vbExclamation
+    If firstCol = 0 Then
+        MsgBox "見出し行（" & HEADER_ROW & " 行目）が見つかりません。", vbExclamation
         Exit Sub
     End If
 
     Dim nCols As Long
     nCols = lastCol - firstCol + 1
 
-    Dim src As Variant
-    src = wsSrc.Range(wsSrc.Cells(HEADER_ROW, firstCol), wsSrc.Cells(lastRow, lastCol)).Value
-    ' src(1, *) が見出し、src(2〜, *) がデータ。列番号は 1 始まり（= シート列 - firstCol + 1）
-
+    ' 見出し行から業者・工種の列を決める
+    Dim hdr As Variant
+    hdr = wsSrc.Range(wsSrc.Cells(HEADER_ROW, firstCol), wsSrc.Cells(HEADER_ROW, lastCol)).Value
     Dim colCompany As Long, colWork As Long
-    colCompany = ResolveColumn(wsSrc, src, firstCol, COMPANY_COL)
-    colWork = ResolveColumn(wsSrc, src, firstCol, WORKTYPE_COL)
+    colCompany = ResolveColumn(wsSrc, hdr, firstCol, COMPANY_COL)
+    colWork = ResolveColumn(wsSrc, hdr, firstCol, WORKTYPE_COL)
     If colCompany = 0 Or colWork = 0 Then
         MsgBox "業者または工種の列が見つかりません。" & vbCrLf & _
                "モジュール先頭の COMPANY_COL / WORKTYPE_COL を確認してください。", vbCritical
         Exit Sub
     End If
+
+    ' データの最終行は業者列・工種列のどちらか遅い方（表の下にあるメモなどは対象外）
+    lastRow = wsSrc.Cells(wsSrc.Rows.Count, firstCol + colCompany - 1).End(xlUp).Row
+    Dim lastRow2 As Long
+    lastRow2 = wsSrc.Cells(wsSrc.Rows.Count, firstCol + colWork - 1).End(xlUp).Row
+    If lastRow2 > lastRow Then lastRow = lastRow2
+    If lastRow <= HEADER_ROW Then
+        MsgBox "データ行がありません。", vbExclamation
+        Exit Sub
+    End If
+
+    Dim src As Variant
+    src = wsSrc.Range(wsSrc.Cells(HEADER_ROW, firstCol), wsSrc.Cells(lastRow, lastCol)).Value
+    ' src(1, *) が見出し、src(2〜, *) がデータ。列番号は 1 始まり（= シート列 - firstCol + 1）
+
+    ' エラー値（#N/A など）のセルは空欄として扱う
+    Dim rr As Long, cc As Long
+    For rr = 1 To UBound(src, 1)
+        For cc = 1 To UBound(src, 2)
+            If IsError(src(rr, cc)) Then src(rr, cc) = Empty
+        Next cc
+    Next rr
 
     ' 列ごとの扱い: 0=初出優先(空欄なら補完) 1=数値合計 2=文字列結合 3=工種ごとの内訳
     Dim mode() As Long
@@ -154,7 +178,7 @@ Public Sub 業者を1行に集約()
 
     For r = 2 To UBound(src, 1)
         company = Trim$(CStr(src(r, colCompany)))
-        If Len(company) > 0 Then
+        If Len(NormalizeKey(company)) > 0 Then
             nDataRows = nDataRows + 1
             work = Trim$(CStr(src(r, colWork)))
             key = NormalizeKey(company)
@@ -305,6 +329,15 @@ Public Sub 業者を1行に集約()
             Next r
         End If
     Next c
+    For c = 1 To nCols
+        If mode(c) = 2 Then
+            If wsOut.Cells(HEADER_ROW + 1, firstCol + c - 1).WrapText Then
+                For r = 1 To outCount
+                    If InStr(CStr(out(r, c)), JOIN_DELIMITER) > 0 Then needFit(r) = True
+                Next r
+            End If
+        End If
+    Next c
     For r = 1 To outCount
         If needFit(r) Then wsOut.Rows(HEADER_ROW + r).AutoFit
     Next r
@@ -335,6 +368,7 @@ Private Function TypicalRowHeight(ByVal ws As Worksheet, ByVal r1 As Long, ByVal
     If r2 < r1 Then Exit Function
     If r2 - r1 > 2000 Then r2 = r1 + 2000         ' 行数が多いときは先頭 2000 行で判断
     For r = r1 To r2
+        If ws.Rows(r).Hidden Then GoTo NextRow
         h = ws.Rows(r).RowHeight
         k = CStr(Round(h, 2))
         n = 0
@@ -351,6 +385,7 @@ Private Function TypicalRowHeight(ByVal ws As Worksheet, ByVal r1 As Long, ByVal
             n = n + 1
         End If
         If n > bestN Then bestN = n: best = h
+NextRow:
     Next r
     TypicalRowHeight = best
 End Function
@@ -361,7 +396,7 @@ Private Function DisplayWidth(ByVal s As String) As Double
     For i = 1 To Len(s)
         code = AscW(Mid$(s, i, 1))
         If code < 0 Then code = code + 65536
-        If code > 255 And Not (code >= &HFF61 And code <= &HFF9F) Then
+        If code > 255 And Not (code >= &HFF61& And code <= &HFF9F&) Then
             w = w + 2          ' 全角（半角カナを除く）
         Else
             w = w + 1
@@ -476,18 +511,31 @@ End Function
 ' 半角カンマ（ただし 1,250,000 のような桁区切りは分割しない）
 Private Function SplitItems(ByVal raw As String) As Variant
     Dim buf As String, ch As String, i As Long, out As String
-    buf = Replace(raw, vbCrLf, vbLf)
+    buf = NarrowAscii(raw)                   ' 全角の数字・カンマ・記号を半角にそろえる（カナはそのまま）
+    buf = Replace(buf, vbCrLf, vbLf)
     buf = Replace(buf, vbCr, vbLf)
     For i = 1 To Len(buf)
         ch = Mid$(buf, i, 1)
         Select Case ch
-            Case vbLf, "、", "，", "／", "/", ";", "；"
+            Case vbLf, "、", ";"
                 out = out & Chr(3)
             Case ","
+                ' 1,250,000 のような桁区切りは分割しない
                 If i > 1 And i + 3 <= Len(buf) Then
                     If IsDigitChar(Mid$(buf, i - 1, 1)) And IsDigitChar(Mid$(buf, i + 1, 1)) _
                        And IsDigitChar(Mid$(buf, i + 2, 1)) And IsDigitChar(Mid$(buf, i + 3, 1)) Then
-                        out = out & ch        ' 桁区切り
+                        out = out & ch
+                    Else
+                        out = out & Chr(3)
+                    End If
+                Else
+                    out = out & Chr(3)
+                End If
+            Case "/"
+                ' 10/25 のような日付の中のスラッシュは分割しない
+                If i > 1 And i < Len(buf) Then
+                    If IsDigitChar(Mid$(buf, i - 1, 1)) And IsDigitChar(Mid$(buf, i + 1, 1)) Then
+                        out = out & ch
                     Else
                         out = out & Chr(3)
                     End If
@@ -521,10 +569,30 @@ Private Function IsDigitChar(ByVal ch As String) As Boolean
     IsDigitChar = (ch >= "0" And ch <= "9")
 End Function
 
+' 全角の英数字・記号（！〜～）と全角スペース・全角円記号を半角にする（文字数は変わらない。カナは変換しない）
+Private Function NarrowAscii(ByVal s As String) As String
+    Dim i As Long, code As Long, ch As String, out As String
+    For i = 1 To Len(s)
+        ch = Mid$(s, i, 1)
+        code = AscW(ch)
+        If code < 0 Then code = code + 65536
+        If code >= &HFF01& And code <= &HFF5E& Then
+            out = out & ChrW(code - &HFF01& + &H21)
+        ElseIf code = &H3000 Then
+            out = out & " "
+        ElseIf code = &HFFE5& Then
+            out = out & "\"
+        Else
+            out = out & ch
+        End If
+    Next i
+    NarrowAscii = out
+End Function
+
 ' 「基礎工事 800,000」「￥450,000」「外構：450000円」などから項目名と金額を取り出す
 Private Sub ParseAmount(ByVal item As String, ByRef label As String, ByRef amount As Double, ByRef ok As Boolean)
     Dim s As String, i As Long, ch As String, numEnd As Long, numStart As Long, numText As String
-    s = StrConv(Trim$(item), vbNarrow)          ' 全角数字・記号を半角に
+    s = NarrowAscii(Trim$(item))                ' 全角の数字・記号を半角に（カナはそのまま）
     s = Replace(s, "円", "")
     s = Replace(s, "￥", "")
     s = Replace(s, ChrW(&HA5), "")   ' 半角の円記号
@@ -552,21 +620,30 @@ Private Sub ParseAmount(ByVal item As String, ByRef label As String, ByRef amoun
     Next i
     numText = Replace(Mid$(s, numStart, numEnd - numStart + 1), ",", "")
     If Not IsNumeric(numText) Then Exit Sub
-    ' 「10/25」「3月」「50%」「2回目」のような数字は金額ではないので除外
+    ' 「10/25」「2024-10-25」「3月」「50%」「2回目」のような数字は金額ではないので除外
     If numStart > 1 Then
         If Mid$(s, numStart - 1, 1) = "/" Then Exit Sub
+        If Mid$(s, numStart - 1, 1) = "-" And numStart > 2 Then
+            If IsDigitChar(Mid$(s, numStart - 2, 1)) Then Exit Sub
+        End If
     End If
     If numEnd < Len(s) Then
         If InStr("/%月日年時回件名人台", Mid$(s, numEnd + 1, 1)) > 0 Then Exit Sub
     End If
     If numStart > 1 Then
-        If Mid$(s, numStart - 1, 1) = "-" Then numStart = numStart - 1: numText = "-" & numText
+        If Mid$(s, numStart - 1, 1) = "-" Then
+            If numStart - 1 = 1 Then
+                numStart = numStart - 1: numText = "-" & numText
+            ElseIf InStr(" :=(", Mid$(s, numStart - 2, 1)) > 0 Then
+                numStart = numStart - 1: numText = "-" & numText
+            End If
+        End If
     End If
     amount = CDbl(numText)
     ok = True
     label = Trim$(Left$(s, numStart - 1))
     ' 「：」「:」「=」などの末尾記号を落とす
-    Do While Len(label) > 0 And InStr("：:=＝ 　", Right$(label, 1)) > 0
+    Do While Len(label) > 0 And InStr("：:=＝ 　-ー・", Right$(label, 1)) > 0
         label = Left$(label, Len(label) - 1)
     Loop
     ' 数字の後ろに残った文言（例「(税抜)」）はラベルに付ける
@@ -598,18 +675,21 @@ Private Function NormalizeKey(ByVal s As String) As String
         s = Replace(s, " ", "")          ' 半角スペース
         s = Replace(s, "　", "")         ' 全角スペース
         s = Replace(s, vbTab, "")
-        s = StrConv(s, vbNarrow)         ' 英数カナを半角に
-        s = StrConv(s, vbUpperCase)      ' 英字の大文字小文字を無視
+        s = NarrowAscii(s)               ' 全角英数記号を半角に
+        On Error Resume Next
+        s = StrConv(s, vbNarrow)         ' カナも半角にそろえる（対応していない環境では何もしない）
+        On Error GoTo 0
+        s = UCase$(s)                    ' 英字の大文字小文字を無視
     End If
     NormalizeKey = s
 End Function
 
 ' 見出し文字列または列記号から、src 配列上の列番号を得る（見つからなければ 0）
-Private Function ResolveColumn(ByVal ws As Worksheet, ByRef src As Variant, _
+Private Function ResolveColumn(ByVal ws As Worksheet, ByRef hdr As Variant, _
                                ByVal firstCol As Long, ByVal spec As String) As Long
     Dim c As Long
-    For c = 1 To UBound(src, 2)
-        If Trim$(CStr(src(1, c))) = spec Then
+    For c = 1 To UBound(hdr, 2)
+        If HeaderText(hdr(1, c)) = HeaderText(spec) Then
             ResolveColumn = c
             Exit Function
         End If
@@ -619,7 +699,7 @@ Private Function ResolveColumn(ByVal ws As Worksheet, ByRef src As Variant, _
     On Error Resume Next
     sheetCol = ws.Columns(spec).Column
     On Error GoTo 0
-    If sheetCol >= firstCol And sheetCol - firstCol + 1 <= UBound(src, 2) Then
+    If sheetCol >= firstCol And sheetCol - firstCol + 1 <= UBound(hdr, 2) Then
         ResolveColumn = sheetCol - firstCol + 1
     End If
 End Function
@@ -631,7 +711,7 @@ Private Sub MarkColumns(ByRef mode() As Long, ByRef src As Variant, ByVal names 
     parts = Split(Replace(names, "，", ","), ",")
     For i = LBound(parts) To UBound(parts)
         For c = 1 To UBound(src, 2)
-            If Trim$(CStr(src(1, c))) = Trim$(parts(i)) Then mode(c) = value
+            If HeaderText(src(1, c)) = HeaderText(parts(i)) Then mode(c) = value
         Next c
     Next i
 End Sub
@@ -641,7 +721,7 @@ Private Sub SaveSourceSheetName(ByVal wb As Workbook, ByVal sheetName As String)
     On Error Resume Next
     wb.Names(SRC_NAME_KEY).Delete
     On Error GoTo 0
-    wb.Names.Add Name:=SRC_NAME_KEY, RefersTo:="=" & Chr(34) & sheetName & Chr(34), Visible:=False
+    wb.Names.Add Name:=SRC_NAME_KEY, RefersTo:="=" & Chr(34) & Replace(sheetName, Chr(34), Chr(34) & Chr(34)) & Chr(34), Visible:=False
 End Sub
 
 Private Function GetSourceSheetName(ByVal wb As Workbook) As String
@@ -655,6 +735,7 @@ Private Function GetSourceSheetName(ByVal wb As Workbook) As String
     If Len(v) >= 2 Then
         If Left$(v, 1) = Chr(34) And Right$(v, 1) = Chr(34) Then v = Mid$(v, 2, Len(v) - 2)
     End If
+    v = Replace(v, Chr(34) & Chr(34), Chr(34))
     GetSourceSheetName = v
 End Function
 
@@ -677,13 +758,13 @@ Private Function HeaderRowHas(ByVal ws As Worksheet, ByVal spec As String) As Bo
     Dim c As Long, lastC As Long
     lastC = ws.Cells(HEADER_ROW, ws.Columns.Count).End(xlToLeft).Column
     For c = 1 To lastC
-        If Trim$(CStr(ws.Cells(HEADER_ROW, c).Value)) = spec Then
+        If HeaderText(ws.Cells(HEADER_ROW, c).Value) = HeaderText(spec) Then
             HeaderRowHas = True
             Exit Function
         End If
     Next c
     On Error Resume Next
-    HeaderRowHas = Len(Trim$(CStr(ws.Cells(HEADER_ROW, spec).Value))) > 0
+    HeaderRowHas = Len(HeaderText(ws.Cells(HEADER_ROW, spec).Value)) > 0
     On Error GoTo 0
 End Function
 
@@ -703,16 +784,20 @@ Private Function CollHas(ByVal c As Collection, ByVal k As String) As Boolean
     On Error GoTo 0
 End Function
 
-Private Function LastUsedRow(ByVal ws As Worksheet) As Long
-    Dim r As Range
-    Set r = ws.Cells.Find(What:="*", LookIn:=xlFormulas, SearchOrder:=xlByRows, SearchDirection:=xlPrevious)
-    If r Is Nothing Then LastUsedRow = 0 Else LastUsedRow = r.Row
+' 見出し比較用：エラー値は空、改行・空白（全角含む）を除く
+Private Function HeaderText(ByVal v As Variant) As String
+    Dim t As String
+    If IsError(v) Then Exit Function
+    t = CStr(v)
+    t = Replace(t, vbLf, ""): t = Replace(t, vbCr, "")
+    t = Replace(t, " ", ""): t = Replace(t, "　", ""): t = Replace(t, vbTab, "")
+    HeaderText = t
 End Function
 
 Private Function FirstUsedCol(ByVal ws As Worksheet, ByVal headerRow As Long) As Long
     Dim c As Long
     For c = 1 To ws.Columns.Count
-        If Len(Trim$(CStr(ws.Cells(headerRow, c).Value))) > 0 Then
+        If Len(HeaderText(ws.Cells(headerRow, c).Value)) > 0 Then
             FirstUsedCol = c
             Exit Function
         End If
