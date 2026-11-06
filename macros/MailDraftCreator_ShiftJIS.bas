@@ -1,18 +1,10 @@
 Attribute VB_Name = "MailDraftCreator"
 Option Explicit
 
-' 下書きを入れる Outlook アカウントのメールアドレス。
-'   シート「文面」のセル B2 に書いたものを優先し、空欄ならここの値、それも空欄なら自動判定
-'   （既定の保存先がアカウントに結びついていない「Outlook データファイル」のときは、
-'     Outlook に設定されている最初のメールアカウントの「下書き」に入れる）
-Private Const TARGET_ACCOUNT As String = ""
-Private Const TARGET_ACCOUNT_CELL As String = "B2"
-
 Public Sub Outlook下書きメール作成()
     Const FIRST_ROW As Long = 3
     Const MAX_ROWS As Long = 100
     Const OL_MAIL_ITEM As Long = 0
-    Const OL_FOLDER_DRAFTS As Long = 16
 
     Dim wsData As Worksheet
     Dim wsText As Worksheet
@@ -28,10 +20,6 @@ Public Sub Outlook下書きメール作成()
     Dim personName As String
     Dim workType As String
     Dim toAddress As String
-    Dim targetAccount As Object
-    Dim draftsFolder As Object
-    Dim savedItem As Object
-    Dim savedFolderPath As String
 
     On Error GoTo ErrorHandler
 
@@ -59,26 +47,6 @@ Public Sub Outlook下書きメール作成()
     If outlookApp Is Nothing Then
         MsgBox "Outlook(classic)が起動していません。Outlook(classic)を起動してから、再度マクロを実行してください。", vbCritical
         Exit Sub
-    End If
-
-    ' 保存先アカウントを決めます（文面!B2 → マクロの設定 → 自動判定）。
-    Dim targetAddress As String
-    targetAddress = Trim$(CStr(wsText.Range(TARGET_ACCOUNT_CELL).Value))
-    If Len(targetAddress) = 0 Then targetAddress = Trim$(TARGET_ACCOUNT)
-    If Len(targetAddress) > 0 Then
-        Set targetAccount = FindAccount(outlookApp, targetAddress)
-        If targetAccount Is Nothing Then
-            MsgBox "Outlookにアカウント「" & targetAddress & "」が見つかりません。" & vbCrLf & _
-                   "シート「文面」のセル" & TARGET_ACCOUNT_CELL & "に、Outlookに設定してあるメールアドレスを正しく入れてください。", vbExclamation
-            Exit Sub
-        End If
-    Else
-        Set targetAccount = PickAccountForDrafts(outlookApp)
-    End If
-    If Not targetAccount Is Nothing Then
-        On Error Resume Next
-        Set draftsFolder = targetAccount.DeliveryStore.GetDefaultFolder(OL_FOLDER_DRAFTS)
-        On Error GoTo ErrorHandler
     End If
 
     lastRow = FIRST_ROW + MAX_ROWS - 1
@@ -131,41 +99,18 @@ Public Sub Outlook下書きメール作成()
         bodyText = Replace(bodyText, "【工種】", workType)
 
         ' Outlookにメールを1件作成し、送信せず下書きとして保存します。
-        '   保存先アカウントが決まっているときは、そのアカウントの「下書き」フォルダーの中に直接作ります
-        '   （作ってから移動する方法は Gmail などの IMAP アカウントで失敗するため）。
-        Set mailItem = Nothing
-        If Not draftsFolder Is Nothing Then
-            On Error Resume Next
-            Set mailItem = draftsFolder.Items.Add(OL_MAIL_ITEM)
-            On Error GoTo ErrorHandler
-        End If
-        If mailItem Is Nothing Then Set mailItem = outlookApp.CreateItem(OL_MAIL_ITEM)
+        Set mailItem = outlookApp.CreateItem(OL_MAIL_ITEM)
         With mailItem
             .To = toAddress
             .Subject = subjectText
             .Body = bodyText
-            If Not targetAccount Is Nothing Then
-                On Error Resume Next
-                .SendUsingAccount = targetAccount
-                On Error GoTo ErrorHandler
-            End If
             .Save
         End With
-        Set savedItem = mailItem
-
-        ' 最初の 1 通の保存先フォルダーを覚えておき、完了メッセージに表示します。
-        If Len(savedFolderPath) = 0 Then
-            On Error Resume Next
-            savedFolderPath = savedItem.Parent.FolderPath
-            On Error GoTo ErrorHandler
-        End If
 
         createdCount = createdCount + 1
     Next rowNo
 
     MsgBox createdCount & "件のメールをOutlookの下書きに保存しました。" & vbCrLf & _
-           "保存先：" & IIf(Len(savedFolderPath) > 0, savedFolderPath, "（不明）") & vbCrLf & _
-           "（別のアカウントに入れたいときは、シート「文面」のセル" & TARGET_ACCOUNT_CELL & "にそのメールアドレスを書いてください）" & vbCrLf & _
            "メール送信は実行していません。", vbInformation
     Exit Sub
 
@@ -174,37 +119,6 @@ ErrorHandler:
     MsgBox "下書きメール作成中にエラーが発生しました。" & vbCrLf & _
            Err.Number & ": " & Err.Description, vbCritical
 End Sub
-
-Private Function PickAccountForDrafts(ByVal outlookApp As Object) As Object
-    ' 既定の保存先がどのアカウントにも結びついていない（ローカルの Outlook データファイルなど）場合に、
-    ' 最初のメールアカウントを返します。既定の保存先がアカウントのものなら Nothing（既定のまま）。
-    Dim acct As Object, defaultStoreId As String
-    On Error Resume Next
-    defaultStoreId = outlookApp.Session.DefaultStore.StoreID
-    For Each acct In outlookApp.Session.Accounts
-        If acct.DeliveryStore.StoreID = defaultStoreId Then Exit Function
-    Next acct
-    For Each acct In outlookApp.Session.Accounts
-        If Len(acct.SmtpAddress) > 0 Then
-            Set PickAccountForDrafts = acct
-            Exit Function
-        End If
-    Next acct
-    On Error GoTo 0
-End Function
-
-Private Function FindAccount(ByVal outlookApp As Object, ByVal address As String) As Object
-    ' メールアドレス（大文字小文字は区別しない）が一致する Outlook アカウントを返します。無ければ Nothing。
-    Dim acct As Object
-    On Error Resume Next
-    For Each acct In outlookApp.Session.Accounts
-        If StrComp(acct.SmtpAddress, address, vbTextCompare) = 0 Then
-            Set FindAccount = acct
-            Exit Function
-        End If
-    Next acct
-    On Error GoTo 0
-End Function
 
 Private Function GetOutlookApplication() As Object
     ' 起動済みのOutlookだけを取得します。VBAからOutlookの自動起動は行いません。
