@@ -92,6 +92,15 @@ Private Const ADD_COUNT_COLUMN As Boolean = False
 ' 結合した工種が列幅に収まらないとき、セル内で折り返す（列幅は変えない）
 Private Const WRAP_WORKTYPE As Boolean = True
 
+' 担当者とメールアドレスの列（見出し名）。この 2 つは「組」として扱い、別の人のメールアドレスを
+'   担当者に付けてしまわないようにする（担当者が入っている行の担当者＋メールをそのまま採用）
+Private Const PERSON_COL As String = "担当者"
+Private Const MAIL_COL As String = "メールアドレス"
+
+' 集約後に担当者が空欄になった行へ入れる文字（"" なら空欄のまま）。
+'   「御中」にしておくと、Outlook下書きメール作成が止まらず「会社名　御中」の宛名になる
+Private Const EMPTY_PERSON_TEXT As String = "御中"
+
 ' 「業者と担当者ごとに集約」で、業者に加えて行を分ける基準にする列（見出し名をカンマ区切りで）
 '   例 "担当者" … 同じ業者でも担当者が違えば別の行にする（担当者が空欄の行は「担当者なし」のグループ）
 Private Const SPLIT_KEY_COLS As String = "担当者"
@@ -110,7 +119,7 @@ End Sub
 
 Private Sub Consolidate(ByVal extraKeyCols As String)
     Dim wb As Workbook
-    Set wb = ActiveWorkbook
+    Set wb = ThisWorkbook      ' ボタンのあるこのブックを対象にする（別のブックが前面でも誤動作しない）
 
     ' 入力は常に「依頼リスト」シート
     Dim wsSrc As Worksheet
@@ -144,6 +153,13 @@ Private Sub Consolidate(ByVal extraKeyCols As String)
                "モジュール先頭の COMPANY_COL / WORKTYPE_COL を確認してください。", vbCritical
         Exit Sub
     End If
+
+    ' 担当者・メールアドレスの列（両方見つかったときだけ「組」として扱う）
+    Dim colPerson As Long, colMail As Long
+    colPerson = ResolveColumn(wsSrc, hdr, firstCol, PERSON_COL)
+    colMail = ResolveColumn(wsSrc, hdr, firstCol, MAIL_COL)
+    If colPerson = colCompany Or colPerson = colWork Then colPerson = 0
+    If colMail = colCompany Or colMail = colWork Or colMail = 0 Or colPerson = 0 Then colMail = 0
 
     ' 行を分ける基準に加える列（担当者など）。見つからない列は無視
     Dim keyCols() As Long, nKeyCols As Long, kc As Long, kcol As Long, kparts() As String
@@ -240,6 +256,13 @@ Private Sub Consolidate(ByVal extraKeyCols As String)
                 '---- 既出：工種を結合、他の列は設定どおりに統合 ----
                 idx = dict(key)
                 out(idx, colWork) = AppendWorkType(CStr(out(idx, colWork)), work)
+                ' 担当者が未定で、この行に担当者が入っていれば、担当者とメールをこの行の組で採用する
+                If colMail > 0 Then
+                    If Len(Trim$(CStr(out(idx, colPerson)))) = 0 And Len(Trim$(CStr(src(r, colPerson)))) > 0 Then
+                        out(idx, colPerson) = src(r, colPerson)
+                        out(idx, colMail) = src(r, colMail)
+                    End If
+                End If
                 For c = 1 To nCols
                     If c <> colCompany And c <> colWork Then
                         Select Case mode(c)
@@ -256,7 +279,16 @@ Private Sub Consolidate(ByVal extraKeyCols As String)
                             Case 3   ' 工種ごとの内訳
                                 items(idx, c) = items(idx, c) & Chr(1) & work & Chr(2) & CStr(src(r, c))
                             Case Else ' 初出優先、空欄なら補完
-                                If Len(Trim$(CStr(out(idx, c)))) = 0 Then out(idx, c) = src(r, c)
+                                If c = colMail Then
+                                    ' メールは同じ担当者の行からだけ補完する
+                                    If Len(Trim$(CStr(out(idx, c)))) = 0 Then
+                                        If NormalizeKey(CStr(out(idx, colPerson))) = NormalizeKey(CStr(src(r, colPerson))) Then out(idx, c) = src(r, c)
+                                    End If
+                                ElseIf c = colPerson And colMail > 0 Then
+                                    ' 担当者は上で組として処理済み
+                                ElseIf Len(Trim$(CStr(out(idx, c)))) = 0 Then
+                                    out(idx, c) = src(r, c)
+                                End If
                         End Select
                     End If
                 Next c
@@ -268,6 +300,13 @@ Private Sub Consolidate(ByVal extraKeyCols As String)
     If outCount = 0 Then
         MsgBox "「" & INPUT_SHEET & "」に業者名が入力された行がありません。", vbExclamation
         Exit Sub
+    End If
+
+    '---- 担当者が空欄のままの行には EMPTY_PERSON_TEXT（御中など）を入れる ----
+    If colPerson > 0 And Len(EMPTY_PERSON_TEXT) > 0 Then
+        For r = 1 To outCount
+            If Len(Trim$(Replace(CStr(out(r, colPerson)), "　", ""))) = 0 Then out(r, colPerson) = EMPTY_PERSON_TEXT
+        Next r
     End If
 
     '---- 出力順：同じ業者の行が連続するように並べ替える（業者は初出順、同じ業者の中も初出順） ----
@@ -310,7 +349,7 @@ Private Sub Consolidate(ByVal extraKeyCols As String)
         Dim nBefore As Long
         nBefore = wb.Worksheets.Count
         wsSrc.Copy After:=wsSrc
-        Set wsOut = wb.Worksheets(wsSrc.Index + 1)
+        Set wsOut = ActiveSheet            ' Copy 直後は複製されたシートがアクティブになる
         If wb.Worksheets.Count = nBefore Or wsOut Is wsSrc Then
             Application.ScreenUpdating = True
             MsgBox "「" & OUTPUT_SHEET & "」シートの作成に失敗したため中止しました。", vbCritical
@@ -351,11 +390,23 @@ Private Sub Consolidate(ByVal extraKeyCols As String)
                "「" & INPUT_SHEET & "」と同じ見出しを付けてください。", vbCritical
         Exit Sub
     End If
+    Dim unmapped As String
+    For c = 1 To nCols
+        If colMap(c) = 0 And Len(HeaderText(hdr(1, c))) > 0 Then unmapped = unmapped & "「" & CStr(hdr(1, c)) & "」"
+    Next c
+    If Len(unmapped) > 0 Then
+        Application.ScreenUpdating = True
+        If MsgBox("「" & INPUT_SHEET & "」の列 " & unmapped & " は「" & OUTPUT_SHEET & "」に同じ見出しが無いため書き出されません。" & vbCrLf & _
+                  "（見出しの文字が完全に一致している必要があります）" & vbCrLf & vbCrLf & "このまま続けますか？", vbOKCancel + vbExclamation) <> vbOK Then Exit Sub
+        Application.ScreenUpdating = False
+    End If
 
-    ' 出力シートの既存データ行の範囲（書式のある範囲も含める）
-    Dim oLastRow As Long, fmtLastRow As Long
+    ' 出力シートの既存データ行の範囲：前回の結果（会社名・工種列の最終行）と今回の行数の大きい方
+    Dim oLastRow As Long, fmtLastRow As Long, prevLast As Long
     fmtLastRow = wsOut.UsedRange.Row + wsOut.UsedRange.Rows.Count - 1
-    oLastRow = fmtLastRow
+    prevLast = wsOut.Cells(wsOut.Rows.Count, colMap(colCompany)).End(xlUp).Row
+    oLastRow = wsOut.Cells(wsOut.Rows.Count, colMap(colWork)).End(xlUp).Row
+    If prevLast > oLastRow Then oLastRow = prevLast
     If oLastRow < HEADER_ROW + outCount Then oLastRow = HEADER_ROW + outCount
 
     ' フィルタや行の非表示が残っていても結果がすべて見えるようにする
@@ -519,27 +570,25 @@ End Function
 
 ' 既存の工種リストに新しい工種を追加（重複排除はオプション）
 Private Function AppendWorkType(ByVal current As String, ByVal newWork As String) As String
-    If Len(newWork) = 0 Then
-        AppendWorkType = current
-        Exit Function
-    End If
-    If Len(current) = 0 Then
-        AppendWorkType = newWork
-        Exit Function
-    End If
-
-    If DEDUPE_WORKTYPES Then
-        Dim parts() As String, i As Long
-        parts = Split(current, DELIMITER)
-        For i = LBound(parts) To UBound(parts)
-            If NormalizeKey(parts(i)) = NormalizeKey(newWork) Then
-                AppendWorkType = current
-                Exit Function
+    ' newWork に区切り文字が含まれていれば（例「土木、舗装」）1 つずつ追加する
+    Dim newParts() As String, parts() As String, i As Long, j As Long, found As Boolean, w As String
+    newParts = Split(newWork, DELIMITER)
+    For j = LBound(newParts) To UBound(newParts)
+        w = Trim$(newParts(j))
+        If Len(w) > 0 Then
+            found = False
+            If DEDUPE_WORKTYPES And Len(current) > 0 Then
+                parts = Split(current, DELIMITER)
+                For i = LBound(parts) To UBound(parts)
+                    If NormalizeKey(parts(i)) = NormalizeKey(w) Then found = True
+                Next i
             End If
-        Next i
-    End If
-
-    AppendWorkType = current & DELIMITER & newWork
+            If Not found Then
+                If Len(current) = 0 Then current = w Else current = current & DELIMITER & w
+            End If
+        End If
+    Next j
+    AppendWorkType = current
 End Function
 
 ' 「工種(Chr2)セルの内容」(Chr1 区切り) から内訳テキストを作る（工種名は使わない）。
@@ -640,13 +689,10 @@ Private Function SplitItems(ByVal raw As String) As Variant
                     out = out & Chr(3)
                 End If
             Case "/"
-                ' 10/25 のような日付の中のスラッシュは分割しない
-                If i > 1 And i < Len(buf) Then
-                    If IsDigitChar(Mid$(buf, i - 1, 1)) And IsDigitChar(Mid$(buf, i + 1, 1)) Then
-                        out = out & ch
-                    Else
-                        out = out & Chr(3)
-                    End If
+                ' 10/25 や 2026/10/25 のような日付の中のスラッシュは分割しない
+                ' （前後が 4 桁以下の数字だけで、桁区切りのカンマが付いていないとき）
+                If IsDateSlash(buf, i) Then
+                    out = out & ch
                 Else
                     out = out & Chr(3)
                 End If
@@ -671,6 +717,29 @@ Private Function SplitItems(ByVal raw As String) As Variant
         ReDim Preserve keep(0 To n - 1)
     End If
     SplitItems = keep
+End Function
+
+' buf の i 文字目の "/" が日付の区切りかどうか
+Private Function IsDateSlash(ByVal buf As String, ByVal i As Long) As Boolean
+    Dim a As Long, b As Long, nL As Long, nR As Long
+    a = i - 1
+    Do While a >= 1
+        If Not IsDigitChar(Mid$(buf, a, 1)) Then Exit Do
+        nL = nL + 1: a = a - 1
+    Loop
+    b = i + 1
+    Do While b <= Len(buf)
+        If Not IsDigitChar(Mid$(buf, b, 1)) Then Exit Do
+        nR = nR + 1: b = b + 1
+    Loop
+    If nL = 0 Or nR = 0 Or nL > 4 Or nR > 4 Then Exit Function
+    If a >= 1 Then
+        If Mid$(buf, a, 1) = "," Then Exit Function
+    End If
+    If b <= Len(buf) Then
+        If Mid$(buf, b, 1) = "," Then Exit Function
+    End If
+    IsDateSlash = True
 End Function
 
 Private Function IsDigitChar(ByVal ch As String) As Boolean
@@ -701,7 +770,7 @@ End Function
 Private Sub ParseAmount(ByVal item As String, ByRef label As String, ByRef amount As Double, ByRef ok As Boolean)
     Dim s As String, i As Long, ch As String, numEnd As Long, numStart As Long, numText As String
     s = NarrowAscii(Trim$(item))                ' 全角の数字・記号を半角に（カナはそのまま）
-    s = Replace(s, "円", "")
+    If Right$(s, 1) = "円" Then s = Left$(s, Len(s) - 1)     ' 末尾の「円」だけ除く（「円柱基礎」などの円は残す）
     s = Replace(s, "￥", "")
     s = Replace(s, ChrW(&HA5), "")   ' 半角の円記号
     s = Replace(s, "\", "")
@@ -736,7 +805,7 @@ Private Sub ParseAmount(ByVal item As String, ByRef label As String, ByRef amoun
         End If
     End If
     If numEnd < Len(s) Then
-        If InStr("/%月日年時回件名人台", Mid$(s, numEnd + 1, 1)) > 0 Then Exit Sub
+        If InStr("/%月日年時回件名人台万千億", Mid$(s, numEnd + 1, 1)) > 0 Then Exit Sub
     End If
     If numStart > 1 Then
         If Mid$(s, numStart - 1, 1) = "-" Then
@@ -751,13 +820,15 @@ Private Sub ParseAmount(ByVal item As String, ByRef label As String, ByRef amoun
     ok = True
     label = Trim$(Left$(s, numStart - 1))
     ' 「：」「:」「=」などの末尾記号を落とす
-    Do While Len(label) > 0 And InStr("：:=＝ 　-ー・", Right$(label, 1)) > 0
+    Do While Len(label) > 0 And InStr("：:=＝ 　-・", Right$(label, 1)) > 0
         label = Left$(label, Len(label) - 1)
     Loop
     ' 数字の後ろに残った文言（例「(税抜)」）はラベルに付ける
     If numEnd < Len(s) Then
         Dim tail As String
         tail = Trim$(Mid$(s, numEnd + 1))
+        If Left$(tail, 1) = "円" Then tail = Trim$(Mid$(tail, 2))     ' 「50,000円 税込」の円
+        If tail = "-" Or tail = "ー" Then tail = ""                   ' 「50,000-」の末尾記号
         If Len(tail) > 0 Then label = Trim$(label & " " & tail)
     End If
 End Sub
