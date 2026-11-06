@@ -1,10 +1,15 @@
 Attribute VB_Name = "MailDraftCreator"
 Option Explicit
 
+' 下書きを入れる Outlook アカウントのメールアドレス（空欄 "" なら Outlook の既定のアカウント）
+'   複数アカウントがあって、見ているアカウントと違う方に下書きが入ってしまう場合に指定する
+Private Const TARGET_ACCOUNT As String = ""
+
 Public Sub Outlook下書きメール作成()
     Const FIRST_ROW As Long = 3
     Const MAX_ROWS As Long = 100
     Const OL_MAIL_ITEM As Long = 0
+    Const OL_FOLDER_DRAFTS As Long = 16
 
     Dim wsData As Worksheet
     Dim wsText As Worksheet
@@ -20,6 +25,10 @@ Public Sub Outlook下書きメール作成()
     Dim personName As String
     Dim workType As String
     Dim toAddress As String
+    Dim targetAccount As Object
+    Dim draftsFolder As Object
+    Dim savedItem As Object
+    Dim savedFolderPath As String
 
     On Error GoTo ErrorHandler
 
@@ -47,6 +56,17 @@ Public Sub Outlook下書きメール作成()
     If outlookApp Is Nothing Then
         MsgBox "Outlook(classic)が起動していません。Outlook(classic)を起動してから、再度マクロを実行してください。", vbCritical
         Exit Sub
+    End If
+
+    ' 保存先アカウントが指定されていれば、そのアカウントと「下書き」フォルダーを取得します。
+    If Len(Trim$(TARGET_ACCOUNT)) > 0 Then
+        Set targetAccount = FindAccount(outlookApp, TARGET_ACCOUNT)
+        If targetAccount Is Nothing Then
+            MsgBox "Outlookにアカウント「" & TARGET_ACCOUNT & "」が見つかりません。" & vbCrLf & _
+                   "マクロ先頭の TARGET_ACCOUNT を確認してください。", vbExclamation
+            Exit Sub
+        End If
+        Set draftsFolder = targetAccount.DeliveryStore.GetDefaultFolder(OL_FOLDER_DRAFTS)
     End If
 
     lastRow = FIRST_ROW + MAX_ROWS - 1
@@ -104,13 +124,28 @@ Public Sub Outlook下書きメール作成()
             .To = toAddress
             .Subject = subjectText
             .Body = bodyText
+            If Not targetAccount Is Nothing Then .SendUsingAccount = targetAccount
             .Save
         End With
+
+        ' 指定アカウントがあれば、そのアカウントの「下書き」フォルダーへ移します。
+        Set savedItem = mailItem
+        If Not draftsFolder Is Nothing Then
+            Set savedItem = mailItem.Move(draftsFolder)
+        End If
+
+        ' 最初の 1 通の保存先フォルダーを覚えておき、完了メッセージに表示します。
+        If Len(savedFolderPath) = 0 Then
+            On Error Resume Next
+            savedFolderPath = savedItem.Parent.FolderPath
+            On Error GoTo ErrorHandler
+        End If
 
         createdCount = createdCount + 1
     Next rowNo
 
     MsgBox createdCount & "件のメールをOutlookの下書きに保存しました。" & vbCrLf & _
+           "保存先：" & IIf(Len(savedFolderPath) > 0, savedFolderPath, "（不明）") & vbCrLf & _
            "メール送信は実行していません。", vbInformation
     Exit Sub
 
@@ -119,6 +154,19 @@ ErrorHandler:
     MsgBox "下書きメール作成中にエラーが発生しました。" & vbCrLf & _
            Err.Number & ": " & Err.Description, vbCritical
 End Sub
+
+Private Function FindAccount(ByVal outlookApp As Object, ByVal address As String) As Object
+    ' メールアドレス（大文字小文字は区別しない）が一致する Outlook アカウントを返します。無ければ Nothing。
+    Dim acct As Object
+    On Error Resume Next
+    For Each acct In outlookApp.Session.Accounts
+        If StrComp(acct.SmtpAddress, address, vbTextCompare) = 0 Then
+            Set FindAccount = acct
+            Exit Function
+        End If
+    Next acct
+    On Error GoTo 0
+End Function
 
 Private Function GetOutlookApplication() As Object
     ' 起動済みのOutlookだけを取得します。VBAからOutlookの自動起動は行いません。
