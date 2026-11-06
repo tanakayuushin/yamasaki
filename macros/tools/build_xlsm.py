@@ -4,7 +4,7 @@
 
   python3 build_xlsm.py 元ブック.xlsx モジュール.bas 出力.xlsm [実行するSub名 ボタンの文字]
 
-最後の 2 つを指定すると、先頭シートの表の右側（O2 付近）に
+最後の 2 つを指定すると、各シートの表の右側（O2 付近）に
 クリックでそのマクロを実行する図形ボタンを置きます。
 
 Excel 本体を使わずに、MS-OVBA 形式の vbaProject.bin（CP932 / 日本語対応）を
@@ -474,7 +474,8 @@ def build_xlsm(src_xlsx, bas_path, out_xlsm, button_macro=None, button_label=Non
     patched["xl/_rels/workbook.xml.rels"] = rels
 
     if button_macro:
-        add_button(zin, names, patched, sheet_files[0], button_macro, button_label or button_macro)
+        for sf in sheet_files:   # すべてのシートにボタンを置く（どのシートからでも実行できるように）
+            add_button(zin, names, patched, sf, button_macro, button_label or button_macro)
 
     vba_bin = build_vba_project(mod_name, mod_src, codenames)
 

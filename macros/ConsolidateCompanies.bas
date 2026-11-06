@@ -18,20 +18,31 @@ Option Explicit
 '     舗装    山口建設
 '     電気    山口建設
 '
+'   シート構成
+'     「依頼リスト」シート … 依頼する業者・工種などを 1 行ずつ入力する（入力用）
+'     「Sheet1」シート     … 業者ごとに 1 行へまとめた結果（出力用。無ければ自動で作る）
+'
 '   使い方
 '     1. Alt + F11 で VBE を開き、「ファイル」→「ファイルのインポート」で
 '        この .bas を取り込む（または標準モジュールを追加して本文を貼り付け）
 '     2. 必要なら下の「設定」を書き換える
-'     3. 集約したいシートを開いた状態で Alt + F8 →「業者を1行に集約」を実行
-'        （シート上の「業者を1行に集約」ボタンでも可。結果シートのボタンからも何回でも再実行できる）
+'     3. 「依頼リスト」に入力し、Alt + F8 →「業者を1行に集約」を実行
+'        （シート上の「業者を1行に集約」ボタンでも可。どのシートを開いていても、何回でも実行できる）
 '
-'   元のシートは変更しません。元シートを複製した「集約結果」シートに、
-'   罫線・塗り・列幅などの体裁をそのまま保って書き出します。
+'   「依頼リスト」は変更しません。「Sheet1」の見出し行より下を消して結果を書き直します
+'   （Sheet1 の罫線・塗り・列幅などの書式はそのまま）。Sheet1 が無ければ「依頼リスト」を
+'   複製して作ります。Sheet1 の列は見出しの文字で対応づけるので、列の順番が違っても構いません。
 '==============================================================================
 
 '---------------------------- 設定（必要なら書き換える） ----------------------
 
-' 見出し行の行番号
+' 入力用シート名（依頼する業者・工種を 1 行ずつ書くシート）
+Private Const INPUT_SHEET As String = "依頼リスト"
+
+' 出力用シート名（業者ごとに 1 行にまとめた結果を書くシート。無ければ依頼リストを複製して作る）
+Private Const OUTPUT_SHEET As String = "Sheet1"
+
+' 見出し行の行番号（依頼リスト・Sheet1 とも同じ行に見出しがある前提）
 Private Const HEADER_ROW As Long = 2
 
 ' 業者名の列。見出しの文字列（例 "業者"）か、列記号（例 "C"）のどちらでも可
@@ -65,9 +76,6 @@ Private Const JOIN_COLS As String = "備考"
 ' 結合する列（JOIN_COLS）の区切り文字
 Private Const JOIN_DELIMITER As String = " ／ "
 
-' 結果を書き出すシート名（同名シートがあれば中身を消して上書き）
-Private Const OUTPUT_SHEET As String = "集約結果"
-
 ' 同じ工種が重複して出てきたとき 1 回だけにする（True）／そのまま並べる（False）
 Private Const DEDUPE_WORKTYPES As Boolean = True
 
@@ -80,33 +88,20 @@ Private Const ADD_COUNT_COLUMN As Boolean = False
 ' 結合した工種が列幅に収まらないとき、セル内で折り返す（列幅は変えない）
 Private Const WRAP_WORKTYPE As Boolean = True
 
-' （内部用）結果シートから再実行するときに集約元シート名を覚えておく名前
-Private Const SRC_NAME_KEY As String = "業者集約_元シート"
-
 '------------------------------------------------------------------------------
 
 Public Sub 業者を1行に集約()
+    Dim wb As Workbook
+    Set wb = ActiveWorkbook
+
+    ' 入力は常に「依頼リスト」シート
     Dim wsSrc As Worksheet
-    If TypeName(ActiveSheet) <> "Worksheet" Then
-        MsgBox "集約したい表のあるシートを開いた状態で実行してください。", vbExclamation
+    If Not SheetExists(wb, INPUT_SHEET) Then
+        MsgBox "「" & INPUT_SHEET & "」シートが見つかりません。" & vbCrLf & _
+               "依頼する業者・工種を入力するシートの名前を「" & INPUT_SHEET & "」にしてください。", vbExclamation
         Exit Sub
     End If
-    Set wsSrc = ActiveSheet
-
-    ' 結果シート上のボタンから押された場合は、前回の集約元シートを使う（何回でも実行できる）
-    If wsSrc.Name = OUTPUT_SHEET Then
-        Dim srcName As String
-        srcName = GetSourceSheetName(wsSrc.Parent)
-        If Len(srcName) = 0 Or Not SheetExists(wsSrc.Parent, srcName) Then
-            ' 覚えていなければ、見出し行に「業者」「工種」があるシートを探す
-            srcName = FindSourceSheetByHeaders(wsSrc.Parent)
-        End If
-        If Len(srcName) = 0 Then
-            MsgBox "集約元のシートが分かりません。元のシートを開いた状態で実行してください。", vbExclamation
-            Exit Sub
-        End If
-        Set wsSrc = wsSrc.Parent.Worksheets(srcName)
-    End If
+    Set wsSrc = wb.Worksheets(INPUT_SHEET)
 
     '---- 表の範囲を決める（見出し行の最初の文字～最後の文字がある列） ----
     Dim firstCol As Long, lastCol As Long, lastRow As Long
@@ -122,12 +117,12 @@ Public Sub 業者を1行に集約()
 
     ' 見出し行から業者・工種の列を決める
     Dim hdr As Variant
-    hdr = wsSrc.Range(wsSrc.Cells(HEADER_ROW, firstCol), wsSrc.Cells(HEADER_ROW, lastCol)).Value
+    hdr = To2D(wsSrc.Range(wsSrc.Cells(HEADER_ROW, firstCol), wsSrc.Cells(HEADER_ROW, lastCol)).Value)
     Dim colCompany As Long, colWork As Long
     colCompany = ResolveColumn(wsSrc, hdr, firstCol, COMPANY_COL)
     colWork = ResolveColumn(wsSrc, hdr, firstCol, WORKTYPE_COL)
     If colCompany = 0 Or colWork = 0 Then
-        MsgBox "業者または工種の列が見つかりません。" & vbCrLf & _
+        MsgBox "「" & INPUT_SHEET & "」に業者または工種の列が見つかりません。" & vbCrLf & _
                "モジュール先頭の COMPANY_COL / WORKTYPE_COL を確認してください。", vbCritical
         Exit Sub
     End If
@@ -138,12 +133,12 @@ Public Sub 業者を1行に集約()
     lastRow2 = wsSrc.Cells(wsSrc.Rows.Count, firstCol + colWork - 1).End(xlUp).Row
     If lastRow2 > lastRow Then lastRow = lastRow2
     If lastRow <= HEADER_ROW Then
-        MsgBox "データ行がありません。", vbExclamation
+        MsgBox "「" & INPUT_SHEET & "」にデータ行がありません。", vbExclamation
         Exit Sub
     End If
 
     Dim src As Variant
-    src = wsSrc.Range(wsSrc.Cells(HEADER_ROW, firstCol), wsSrc.Cells(lastRow, lastCol)).Value
+    src = To2D(wsSrc.Range(wsSrc.Cells(HEADER_ROW, firstCol), wsSrc.Cells(lastRow, lastCol)).Value)
     ' src(1, *) が見出し、src(2〜, *) がデータ。列番号は 1 始まり（= シート列 - firstCol + 1）
 
     ' エラー値（#N/A など）のセルは空欄として扱う
@@ -226,7 +221,7 @@ Public Sub 業者を1行に集約()
     Next r
 
     If outCount = 0 Then
-        MsgBox "業者名が入力された行がありません。", vbExclamation
+        MsgBox "「" & INPUT_SHEET & "」に業者名が入力された行がありません。", vbExclamation
         Exit Sub
     End If
 
@@ -239,66 +234,104 @@ Public Sub 業者を1行に集約()
         End If
     Next c
 
-    '---- 書き出し：元シートをまるごと複製し、データ行だけ差し替える（罫線・塗り・列幅・印刷設定はそのまま） ----
-    Dim wb As Workbook
-    Set wb = wsSrc.Parent
-
+    '---- 書き出し：「Sheet1」の見出し行より下を消して結果を書く（Sheet1 が無ければ依頼リストを複製して作る） ----
     ' 途中でエラーが起きても画面更新や警告表示の設定を元に戻す
     On Error GoTo Failed
-
     Application.ScreenUpdating = False
-    Application.DisplayAlerts = False
-    On Error Resume Next
-    wb.Sheets(OUTPUT_SHEET).Delete          ' 前回の結果（グラフシートでも）を消す
-    On Error GoTo Failed
-    Application.DisplayAlerts = True
 
-    Dim nBefore As Long
-    nBefore = wb.Worksheets.Count
-    wsSrc.Copy After:=wb.Sheets(wb.Sheets.Count)
     Dim wsOut As Worksheet
-    Set wsOut = wb.Worksheets(wb.Worksheets.Count)
-    If wb.Worksheets.Count = nBefore Or wsOut Is wsSrc Then
+    If SheetExists(wb, OUTPUT_SHEET) Then
+        Set wsOut = wb.Worksheets(OUTPUT_SHEET)
+    Else
+        Dim nBefore As Long
+        nBefore = wb.Worksheets.Count
+        wsSrc.Copy After:=wsSrc
+        Set wsOut = wb.Worksheets(wsSrc.Index + 1)
+        If wb.Worksheets.Count = nBefore Or wsOut Is wsSrc Then
+            Application.ScreenUpdating = True
+            MsgBox "「" & OUTPUT_SHEET & "」シートの作成に失敗したため中止しました。", vbCritical
+            Exit Sub
+        End If
+        wsOut.Name = OUTPUT_SHEET
+    End If
+
+    ' 出力シートの見出し行。見出しが無ければ依頼リストの見出しを同じ位置にコピーする
+    Dim oFirst As Long, oLast As Long
+    oFirst = FirstUsedCol(wsOut, HEADER_ROW)
+    oLast = LastUsedCol(wsOut, HEADER_ROW)
+    If oFirst = 0 Then
+        wsSrc.Range(wsSrc.Cells(HEADER_ROW, firstCol), wsSrc.Cells(HEADER_ROW, lastCol)).Copy wsOut.Cells(HEADER_ROW, firstCol)
+        oFirst = firstCol
+        oLast = lastCol
+    End If
+    Dim ohdr As Variant
+    ohdr = To2D(wsOut.Range(wsOut.Cells(HEADER_ROW, oFirst), wsOut.Cells(HEADER_ROW, oLast)).Value)
+
+    ' 依頼リストの列 c → 出力シートの列番号（見出しの文字で対応づけ。0 = 出力シートに無い列）
+    Dim colMap() As Long
+    ReDim colMap(1 To nCols)
+    Dim oc As Long
+    For c = 1 To nCols
+        If Len(HeaderText(hdr(1, c))) > 0 Then
+            For oc = 1 To UBound(ohdr, 2)
+                If HeaderText(ohdr(1, oc)) = HeaderText(hdr(1, c)) Then
+                    colMap(c) = oFirst + oc - 1
+                    Exit For
+                End If
+            Next oc
+        End If
+    Next c
+    If colMap(colCompany) = 0 Or colMap(colWork) = 0 Then
         Application.ScreenUpdating = True
-        MsgBox "シートの複製に失敗したため中止しました。元のシートは変更していません。", vbCritical
+        MsgBox "「" & OUTPUT_SHEET & "」の " & HEADER_ROW & " 行目に「" & COMPANY_COL & "」「" & WORKTYPE_COL & "」の見出しが見つかりません。" & vbCrLf & _
+               "「" & INPUT_SHEET & "」と同じ見出しを付けてください。", vbCritical
         Exit Sub
     End If
-    wsOut.Name = OUTPUT_SHEET
-    ' ※ 実行ボタンも一緒に複製されるので、結果シートからもそのまま再実行できる
 
-    ' 次回、結果シートから実行されたときのために集約元シート名を覚えておく
-    SaveSourceSheetName wb, wsSrc.Name
+    ' 出力シートの既存データ行の範囲（書式のある範囲も含める）
+    Dim oLastRow As Long, fmtLastRow As Long
+    fmtLastRow = wsOut.UsedRange.Row + wsOut.UsedRange.Rows.Count - 1
+    oLastRow = fmtLastRow
+    If oLastRow < HEADER_ROW + outCount Then oLastRow = HEADER_ROW + outCount
 
-    ' 元シートでフィルタや行の非表示をしていても、結果はすべて見えるようにする
+    ' フィルタや行の非表示が残っていても結果がすべて見えるようにする
     On Error Resume Next
     If wsOut.FilterMode Then wsOut.ShowAllData
     On Error GoTo Failed
-    wsOut.Range(wsOut.Rows(HEADER_ROW + 1), wsOut.Rows(lastRow)).Hidden = False
+    wsOut.Range(wsOut.Rows(HEADER_ROW + 1), wsOut.Rows(oLastRow)).Hidden = False
 
-    ' データ行の値だけ消す（書式は残す）
-    wsOut.Range(wsOut.Cells(HEADER_ROW + 1, firstCol), wsOut.Cells(lastRow, lastCol)).ClearContents
+    ' 前回の結果（データ行の値）だけ消す。書式は残す
+    wsOut.Range(wsOut.Cells(HEADER_ROW + 1, oFirst), wsOut.Cells(oLastRow, oLast)).ClearContents
 
-    ' データ行の高さを元の標準的な高さ（元シートのデータ行で最も多い高さ）に揃える
-    '   元シートで折り返し表示のため高くなっていた行が、別の内容になった結果シートに残らないようにする
+    ' 行数が増えて書式の無い行に書くときは、最初のデータ行の書式を広げる
+    If fmtLastRow >= HEADER_ROW + 1 And HEADER_ROW + outCount > fmtLastRow Then
+        wsOut.Range(wsOut.Cells(HEADER_ROW + 1, oFirst), wsOut.Cells(HEADER_ROW + 1, oLast)).Copy
+        wsOut.Range(wsOut.Cells(fmtLastRow + 1, oFirst), wsOut.Cells(HEADER_ROW + outCount, oLast)).PasteSpecial xlPasteFormats
+        Application.CutCopyMode = False
+    End If
+
+    ' データ行の高さを標準的な高さ（出力シートのデータ行で最も多い高さ）に揃える
     Dim baseHeight As Double
-    baseHeight = TypicalRowHeight(wsSrc, HEADER_ROW + 1, lastRow)
-    If baseHeight > 0 Then wsOut.Range(wsOut.Rows(HEADER_ROW + 1), wsOut.Rows(lastRow)).RowHeight = baseHeight
+    baseHeight = TypicalRowHeight(wsOut, HEADER_ROW + 1, oLastRow)
+    If baseHeight > 0 Then wsOut.Range(wsOut.Rows(HEADER_ROW + 1), wsOut.Rows(oLastRow)).RowHeight = baseHeight
 
-    ' 集約結果を書き込む
-    Dim body() As Variant
-    ReDim body(1 To outCount, 1 To nCols)
-    For r = 1 To outCount
-        For c = 1 To nCols
-            body(r, c) = out(r, c)
-        Next c
-    Next r
-    wsOut.Range(wsOut.Cells(HEADER_ROW + 1, firstCol), wsOut.Cells(HEADER_ROW + outCount, lastCol)).Value = body
+    ' 集約結果を列ごとに書き込む（出力シートに無い列は書かない）
+    Dim colVals() As Variant
+    ReDim colVals(1 To outCount, 1 To 1)
+    For c = 1 To nCols
+        If colMap(c) > 0 Then
+            For r = 1 To outCount
+                colVals(r, 1) = out(r, c)
+            Next r
+            wsOut.Range(wsOut.Cells(HEADER_ROW + 1, colMap(c)), wsOut.Cells(HEADER_ROW + outCount, colMap(c))).Value = colVals
+        End If
+    Next c
 
     ' 「元の行数」列（任意）：見出しと各行の書式は隣の列をコピー
     If ADD_COUNT_COLUMN Then
         Dim cntCol As Long
-        cntCol = lastCol + 1
-        wsOut.Range(wsOut.Cells(HEADER_ROW, lastCol), wsOut.Cells(HEADER_ROW + outCount, lastCol)).Copy
+        cntCol = oLast + 1
+        wsOut.Range(wsOut.Cells(HEADER_ROW, oLast), wsOut.Cells(HEADER_ROW + outCount, oLast)).Copy
         wsOut.Cells(HEADER_ROW, cntCol).PasteSpecial xlPasteFormats
         Application.CutCopyMode = False
         wsOut.Cells(HEADER_ROW, cntCol).Value = "元の行数"
@@ -312,9 +345,9 @@ Public Sub 業者を1行に集約()
     Dim needFit() As Boolean
     ReDim needFit(1 To outCount)
     Dim workColWidth As Double
-    workColWidth = wsOut.Columns(firstCol + colWork - 1).ColumnWidth
+    workColWidth = wsOut.Columns(colMap(colWork)).ColumnWidth
     If WRAP_WORKTYPE Then
-        wsOut.Range(wsOut.Cells(HEADER_ROW + 1, firstCol + colWork - 1), wsOut.Cells(HEADER_ROW + outCount, firstCol + colWork - 1)).WrapText = True
+        wsOut.Range(wsOut.Cells(HEADER_ROW + 1, colMap(colWork)), wsOut.Cells(HEADER_ROW + outCount, colMap(colWork))).WrapText = True
         For r = 1 To outCount
             If DisplayWidth(CStr(out(r, colWork))) > workColWidth Then needFit(r) = True
         Next r
@@ -322,16 +355,16 @@ Public Sub 業者を1行に集約()
 
     ' 内訳列は折り返して、複数行になった行は高さを合わせる（列幅は変えない）
     For c = 1 To nCols
-        If mode(c) = 3 Then
-            wsOut.Range(wsOut.Cells(HEADER_ROW + 1, firstCol + c - 1), wsOut.Cells(HEADER_ROW + outCount, firstCol + c - 1)).WrapText = True
+        If mode(c) = 3 And colMap(c) > 0 Then
+            wsOut.Range(wsOut.Cells(HEADER_ROW + 1, colMap(c)), wsOut.Cells(HEADER_ROW + outCount, colMap(c))).WrapText = True
             For r = 1 To outCount
                 If InStr(CStr(out(r, c)), vbLf) > 0 Then needFit(r) = True
             Next r
         End If
     Next c
     For c = 1 To nCols
-        If mode(c) = 2 Then
-            If wsOut.Cells(HEADER_ROW + 1, firstCol + c - 1).WrapText Then
+        If mode(c) = 2 And colMap(c) > 0 Then
+            If wsOut.Cells(HEADER_ROW + 1, colMap(c)).WrapText Then
                 For r = 1 To outCount
                     If InStr(CStr(out(r, c)), JOIN_DELIMITER) > 0 Then needFit(r) = True
                 Next r
@@ -343,12 +376,12 @@ Public Sub 業者を1行に集約()
     Next r
 
     wsOut.Activate
-    wsOut.Cells(HEADER_ROW, firstCol).Select
+    wsOut.Cells(HEADER_ROW, oFirst).Select
     Application.ScreenUpdating = True
     Application.DisplayAlerts = True
 
-    MsgBox "集約が完了しました。" & vbCrLf & _
-           "元データ " & nDataRows & " 行 → " & outCount & " 社", vbInformation
+    MsgBox "「" & OUTPUT_SHEET & "」に集約しました。" & vbCrLf & _
+           "「" & INPUT_SHEET & "」 " & nDataRows & " 行 → " & outCount & " 社", vbInformation
     Exit Sub
 
 Failed:
@@ -357,8 +390,19 @@ Failed:
     Application.CutCopyMode = False
     MsgBox "処理中にエラーが発生しました。" & vbCrLf & _
            "（" & Err.Number & "：" & Err.Description & "）" & vbCrLf & vbCrLf & _
-           "シートが保護されていないか、「" & OUTPUT_SHEET & "」シートが他で使われていないかを確認してください。", vbCritical
+           "「" & OUTPUT_SHEET & "」シートが保護されていないか、結合セルが無いかを確認してください。", vbCritical
 End Sub
+
+' Range.Value が 1 セルのときは配列にならないので 1×1 の配列にそろえる
+Private Function To2D(ByVal v As Variant) As Variant
+    If IsArray(v) Then
+        To2D = v
+    Else
+        Dim a(1 To 1, 1 To 1) As Variant
+        a(1, 1) = v
+        To2D = a
+    End If
+End Function
 
 ' 指定範囲の行で最も多く使われている行の高さ（データ行の「標準」の高さとみなす）
 Private Function TypicalRowHeight(ByVal ws As Worksheet, ByVal r1 As Long, ByVal r2 As Long) As Double
@@ -715,58 +759,6 @@ Private Sub MarkColumns(ByRef mode() As Long, ByRef src As Variant, ByVal names 
         Next c
     Next i
 End Sub
-
-' 集約元シート名をブック内の非表示の名前に保存／取得する
-Private Sub SaveSourceSheetName(ByVal wb As Workbook, ByVal sheetName As String)
-    On Error Resume Next
-    wb.Names(SRC_NAME_KEY).Delete
-    On Error GoTo 0
-    wb.Names.Add Name:=SRC_NAME_KEY, RefersTo:="=" & Chr(34) & Replace(sheetName, Chr(34), Chr(34) & Chr(34)) & Chr(34), Visible:=False
-End Sub
-
-Private Function GetSourceSheetName(ByVal wb As Workbook) As String
-    Dim v As String
-    On Error Resume Next
-    v = wb.Names(SRC_NAME_KEY).RefersTo
-    On Error GoTo 0
-    ' ="Sheet1" の形で返るので、= と引用符を外す
-    v = Trim$(v)
-    If Left$(v, 1) = "=" Then v = Mid$(v, 2)
-    If Len(v) >= 2 Then
-        If Left$(v, 1) = Chr(34) And Right$(v, 1) = Chr(34) Then v = Mid$(v, 2, Len(v) - 2)
-    End If
-    v = Replace(v, Chr(34) & Chr(34), Chr(34))
-    GetSourceSheetName = v
-End Function
-
-'  見出し行に業者・工種の列があるシートを探す（結果シート以外で 1 つだけ見つかればその名前、なければ ""）
-Private Function FindSourceSheetByHeaders(ByVal wb As Workbook) As String
-    Dim ws As Worksheet, found As String, n As Long
-    For Each ws In wb.Worksheets
-        If ws.Name <> OUTPUT_SHEET Then
-            If HeaderRowHas(ws, COMPANY_COL) And HeaderRowHas(ws, WORKTYPE_COL) Then
-                found = ws.Name
-                n = n + 1
-            End If
-        End If
-    Next ws
-    If n = 1 Then FindSourceSheetByHeaders = found
-End Function
-
-' 見出し行（HEADER_ROW）に spec と一致するセルがあるか（列記号指定の場合はその列に何か入っているか）
-Private Function HeaderRowHas(ByVal ws As Worksheet, ByVal spec As String) As Boolean
-    Dim c As Long, lastC As Long
-    lastC = ws.Cells(HEADER_ROW, ws.Columns.Count).End(xlToLeft).Column
-    For c = 1 To lastC
-        If HeaderText(ws.Cells(HEADER_ROW, c).Value) = HeaderText(spec) Then
-            HeaderRowHas = True
-            Exit Function
-        End If
-    Next c
-    On Error Resume Next
-    HeaderRowHas = Len(HeaderText(ws.Cells(HEADER_ROW, spec).Value)) > 0
-    On Error GoTo 0
-End Function
 
 Private Function SheetExists(ByVal wb As Workbook, ByVal sheetName As String) As Boolean
     Dim ws As Worksheet
