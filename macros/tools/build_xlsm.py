@@ -3,6 +3,7 @@
 元の .xlsx に VBA 標準モジュール（.bas）を組み込んで .xlsm を作るツール。
 
   python3 build_xlsm.py 元ブック.xlsx モジュール.bas 出力.xlsm [実行するSub名 ボタンの文字]
+  （ボタンを複数置くときは "Sub名1;Sub名2" "文字1;文字2" のように ; で区切る）
 
 最後の 2 つを指定すると、各シートの表の右側（O2 付近）に
 クリックでそのマクロを実行する図形ボタンを置きます。
@@ -374,20 +375,28 @@ def build_vba_project(std_name, std_source, sheet_codenames):
 
 # ---------------------------------------------------------------- シート上の実行ボタン
 
-DRAWING_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:twoCellAnchor><xdr:from><xdr:col>{c1}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{r1}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>{c2}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{r2}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:sp macro="[0]!{macro}" textlink=""><xdr:nvSpPr><xdr:cNvPr id="2" name="MacroButton"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm><a:prstGeom prst="roundRect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="2E75B6"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="1F4E79"/></a:solidFill></a:ln></xdr:spPr><xdr:style><a:lnRef idx="2"><a:schemeClr val="accent1"><a:shade val="50000"/></a:schemeClr></a:lnRef><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="0"><a:schemeClr val="accent1"/></a:effectRef><a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></xdr:style><xdr:txBody><a:bodyPr vertOverflow="clip" horzOverflow="clip" rtlCol="0" anchor="ctr"/><a:lstStyle/><a:p><a:pPr algn="ctr"/><a:r><a:rPr kumimoji="1" lang="ja-JP" altLang="en-US" sz="1200" b="1"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:rPr><a:t>{label}</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"""
+DRAWING_WRAP = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">{anchors}</xdr:wsDr>"""
+
+DRAWING_XML = """<xdr:twoCellAnchor><xdr:from><xdr:col>{c1}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{r1}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>{c2}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{r2}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:sp macro="[0]!{macro}" textlink=""><xdr:nvSpPr><xdr:cNvPr id="{id}" name="MacroButton{id}"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm><a:prstGeom prst="roundRect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="2E75B6"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="1F4E79"/></a:solidFill></a:ln></xdr:spPr><xdr:style><a:lnRef idx="2"><a:schemeClr val="accent1"><a:shade val="50000"/></a:schemeClr></a:lnRef><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="0"><a:schemeClr val="accent1"/></a:effectRef><a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></xdr:style><xdr:txBody><a:bodyPr vertOverflow="clip" horzOverflow="clip" rtlCol="0" anchor="ctr"/><a:lstStyle/><a:p><a:pPr algn="ctr"/><a:r><a:rPr kumimoji="1" lang="ja-JP" altLang="en-US" sz="1200" b="1"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:rPr><a:t>{label}</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>"""
 
 
-def add_button(zin, names, patched, sheet_file, macro, label, cell_from=(14, 1), cell_to=(17, 4)):
-    """sheet_file に、クリックで macro を実行する図形ボタンを追加する（0 始まりの列・行で位置指定）"""
+def add_button(zin, names, patched, sheet_file, buttons, cell_from=(14, 1), cell_to=(17, 4)):
+    """sheet_file に、クリックでマクロを実行する図形ボタンを追加する。
+    buttons は [(マクロ名, ボタンの文字), ...]。複数あれば縦に並べる（0 始まりの列・行で位置指定）"""
     if "<drawing " in patched.get(sheet_file, zin.read(sheet_file).decode("utf-8")):
         return  # 既に図形があるシートには手を付けない
     n = 1
     while "xl/drawings/drawing%d.xml" % n in names or "xl/drawings/drawing%d.xml" % n in patched:
         n += 1
     drawing_path = "xl/drawings/drawing%d.xml" % n
-    patched[drawing_path] = DRAWING_XML.format(c1=cell_from[0], r1=cell_from[1], c2=cell_to[0], r2=cell_to[1],
-                                               macro=macro, label=label)
+    height = cell_to[1] - cell_from[1]
+    anchors = ""
+    for i, (macro, label) in enumerate(buttons):
+        r1 = cell_from[1] + i * (height + 1)
+        anchors += DRAWING_XML.format(c1=cell_from[0], r1=r1, c2=cell_to[0], r2=r1 + height,
+                                      macro=macro, label=label, id=i + 2)
+    patched[drawing_path] = DRAWING_WRAP.format(anchors=anchors)
 
     rels_path = sheet_file.replace("worksheets/", "worksheets/_rels/") + ".rels"
     if rels_path in names:
@@ -428,7 +437,7 @@ def load_bas(path):
     return name, src
 
 
-def build_xlsm(src_xlsx, bas_path, out_xlsm, button_macro=None, button_label=None):
+def build_xlsm(src_xlsx, bas_path, out_xlsm, buttons=None):
     mod_name, mod_src = load_bas(bas_path)
     zin = zipfile.ZipFile(src_xlsx)
     names = zin.namelist()
@@ -473,9 +482,9 @@ def build_xlsm(src_xlsx, bas_path, out_xlsm, button_macro=None, button_label=Non
         '<Relationship Id="%s" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/></Relationships>' % rid)
     patched["xl/_rels/workbook.xml.rels"] = rels
 
-    if button_macro:
+    if buttons:
         for sf in sheet_files:   # すべてのシートにボタンを置く（どのシートからでも実行できるように）
-            add_button(zin, names, patched, sf, button_macro, button_label or button_macro)
+            add_button(zin, names, patched, sf, buttons)
 
     vba_bin = build_vba_project(mod_name, mod_src, codenames)
 
@@ -499,7 +508,14 @@ if __name__ == "__main__":
     if len(sys.argv) not in (4, 6):
         print(__doc__)
         sys.exit(1)
-    bm = sys.argv[4] if len(sys.argv) == 6 else None
-    bl = sys.argv[5] if len(sys.argv) == 6 else None
-    name, cns = build_xlsm(sys.argv[1], sys.argv[2], sys.argv[3], bm, bl)
+    buttons = None
+    if len(sys.argv) == 6:
+        # "マクロ名|文字;マクロ名|文字" の形で複数指定できる（| を省けばマクロ名がそのまま文字になる）
+        macros = sys.argv[4].split(";")
+        labels = sys.argv[5].split(";")
+        buttons = []
+        for i, m in enumerate(macros):
+            lab = labels[i] if i < len(labels) and labels[i] else m
+            buttons.append((m.strip(), lab.strip()))
+    name, cns = build_xlsm(sys.argv[1], sys.argv[2], sys.argv[3], buttons)
     print("作成しました:", sys.argv[3], "モジュール:", name, "シート:", cns)

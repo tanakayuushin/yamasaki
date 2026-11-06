@@ -22,12 +22,16 @@ Option Explicit
 '     「依頼リスト」シート … 依頼する業者・工種などを 1 行ずつ入力する（入力用）
 '     「Sheet1」シート     … 業者ごとに 1 行へまとめた結果（出力用。無ければ自動で作る）
 '
+'   マクロは 2 つ
+'     業者を1行に集約       … 業者ごとに 1 行（担当者やメールアドレスが違っても同じ業者なら 1 行。最初の行の値を採用）
+'     業者と担当者ごとに集約 … 業者と担当者の組み合わせごとに 1 行（担当者が違えば別の行）
+'
 '   使い方
 '     1. Alt + F11 で VBE を開き、「ファイル」→「ファイルのインポート」で
 '        この .bas を取り込む（または標準モジュールを追加して本文を貼り付け）
 '     2. 必要なら下の「設定」を書き換える
-'     3. 「依頼リスト」に入力し、Alt + F8 →「業者を1行に集約」を実行
-'        （シート上の「業者を1行に集約」ボタンでも可。どのシートを開いていても、何回でも実行できる）
+'     3. 「依頼リスト」に入力し、Alt + F8 → どちらかのマクロを実行
+'        （シート上のボタンでも可。どのシートを開いていても、何回でも実行できる）
 '
 '   「依頼リスト」は変更しません。「Sheet1」の見出し行より下を消して結果を書き直します
 '   （Sheet1 の罫線・塗り・列幅などの書式はそのまま）。Sheet1 が無ければ「依頼リスト」を
@@ -88,9 +92,23 @@ Private Const ADD_COUNT_COLUMN As Boolean = False
 ' 結合した工種が列幅に収まらないとき、セル内で折り返す（列幅は変えない）
 Private Const WRAP_WORKTYPE As Boolean = True
 
+' 「業者と担当者ごとに集約」で、業者に加えて行を分ける基準にする列（見出し名をカンマ区切りで）
+'   例 "担当者" … 同じ業者でも担当者が違えば別の行にする（担当者が空欄の行は「担当者なし」のグループ）
+Private Const SPLIT_KEY_COLS As String = "担当者"
+
 '------------------------------------------------------------------------------
 
+' 業者ごとに 1 行にまとめる（担当者などが違っても同じ業者なら 1 行）
 Public Sub 業者を1行に集約()
+    Consolidate ""
+End Sub
+
+' 業者と担当者（SPLIT_KEY_COLS）の組み合わせごとに 1 行にまとめる
+Public Sub 業者と担当者ごとに集約()
+    Consolidate SPLIT_KEY_COLS
+End Sub
+
+Private Sub Consolidate(ByVal extraKeyCols As String)
     Dim wb As Workbook
     Set wb = ActiveWorkbook
 
@@ -125,6 +143,20 @@ Public Sub 業者を1行に集約()
         MsgBox "「" & INPUT_SHEET & "」に業者または工種の列が見つかりません。" & vbCrLf & _
                "モジュール先頭の COMPANY_COL / WORKTYPE_COL を確認してください。", vbCritical
         Exit Sub
+    End If
+
+    ' 行を分ける基準に加える列（担当者など）。見つからない列は無視
+    Dim keyCols() As Long, nKeyCols As Long, kc As Long, kcol As Long, kparts() As String
+    ReDim keyCols(1 To nCols)
+    If Len(Trim$(extraKeyCols)) > 0 Then
+        kparts = Split(Replace(extraKeyCols, "，", ","), ",")
+        For kc = LBound(kparts) To UBound(kparts)
+            kcol = ResolveColumn(wsSrc, hdr, firstCol, Trim$(kparts(kc)))
+            If kcol > 0 And kcol <> colCompany Then
+                nKeyCols = nKeyCols + 1
+                keyCols(nKeyCols) = kcol
+            End If
+        Next kc
     End If
 
     ' データの最終行は業者列・工種列のどちらか遅い方（表の下にあるメモなどは対象外）
@@ -177,6 +209,9 @@ Public Sub 業者を1行に集約()
             nDataRows = nDataRows + 1
             work = Trim$(CStr(src(r, colWork)))
             key = NormalizeKey(company)
+            For kc = 1 To nKeyCols
+                key = key & Chr(1) & NormalizeKey(CStr(src(r, keyCols(kc))))
+            Next kc
 
             If Not CollHas(dict, key) Then
                 '---- 初出：その行を丸ごとコピー ----
@@ -381,7 +416,7 @@ Public Sub 業者を1行に集約()
     Application.DisplayAlerts = True
 
     MsgBox "「" & OUTPUT_SHEET & "」に集約しました。" & vbCrLf & _
-           "「" & INPUT_SHEET & "」 " & nDataRows & " 行 → " & outCount & " 社", vbInformation
+           "「" & INPUT_SHEET & "」 " & nDataRows & " 行 → " & outCount & IIf(nKeyCols > 0, " 行（業者と" & extraKeyCols & "の組み合わせ）", " 社"), vbInformation
     Exit Sub
 
 Failed:
