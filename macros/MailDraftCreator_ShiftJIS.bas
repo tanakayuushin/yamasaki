@@ -131,20 +131,27 @@ Public Sub Outlook下書きメール作成()
         bodyText = Replace(bodyText, "【工種】", workType)
 
         ' Outlookにメールを1件作成し、送信せず下書きとして保存します。
-        Set mailItem = outlookApp.CreateItem(OL_MAIL_ITEM)
+        '   保存先アカウントが決まっているときは、そのアカウントの「下書き」フォルダーの中に直接作ります
+        '   （作ってから移動する方法は Gmail などの IMAP アカウントで失敗するため）。
+        Set mailItem = Nothing
+        If Not draftsFolder Is Nothing Then
+            On Error Resume Next
+            Set mailItem = draftsFolder.Items.Add(OL_MAIL_ITEM)
+            On Error GoTo ErrorHandler
+        End If
+        If mailItem Is Nothing Then Set mailItem = outlookApp.CreateItem(OL_MAIL_ITEM)
         With mailItem
             .To = toAddress
             .Subject = subjectText
             .Body = bodyText
-            If Not targetAccount Is Nothing Then .SendUsingAccount = targetAccount
+            If Not targetAccount Is Nothing Then
+                On Error Resume Next
+                .SendUsingAccount = targetAccount
+                On Error GoTo ErrorHandler
+            End If
             .Save
         End With
-
-        ' 指定アカウントがあれば、そのアカウントの「下書き」フォルダーへ移します。
         Set savedItem = mailItem
-        If Not draftsFolder Is Nothing Then
-            Set savedItem = mailItem.Move(draftsFolder)
-        End If
 
         ' 最初の 1 通の保存先フォルダーを覚えておき、完了メッセージに表示します。
         If Len(savedFolderPath) = 0 Then
