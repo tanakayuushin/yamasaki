@@ -68,6 +68,10 @@
 
 ## 自分のブックに組み込む場合
 
+> **日本語版 Excel の VBE に取り込むときは `ConsolidateCompanies_ShiftJIS.bas` を使ってください。**
+> `ConsolidateCompanies.bas` は UTF-8（GitHub 上で読みやすい形）で、そのままインポートすると日本語が文字化けして
+> コンパイルエラーになります。`_ShiftJIS.bas` は同じ内容を Shift-JIS・CRLF で保存したものです。
+
 1. 対象の Excel ブックを開き、`Alt + F11` で VBE を開く
 2. メニュー「ファイル」→「ファイルのインポート」で `ConsolidateCompanies.bas` を選ぶ
    （または「挿入」→「標準モジュール」を追加して本文を貼り付ける）
