@@ -306,17 +306,35 @@ def _build_dir(modules, references):
     return bytes(d)
 
 
+def _encrypt(data: bytes, project_id: str, seed: int) -> str:
+    """MS-OVBA 2.4.3.2 Data Encryption（CMG / DPB / GC 用）。保護なし・パスワードなしの値を正しい鍵で作る"""
+    version = 2
+    project_key = sum(project_id.encode("ascii")) & 0xFF
+    version_enc = seed ^ version
+    project_key_enc = seed ^ project_key
+    out = [seed, version_enc, project_key_enc]
+    enc1, enc2, unenc1 = project_key_enc, version_enc, project_key
+    ignored_len = (seed & 6) // 2
+    stream = [0x00] * ignored_len + list(struct.pack("<I", len(data))) + list(data)
+    for t in stream:
+        b = t ^ ((enc2 + unenc1) & 0xFF)
+        out.append(b)
+        enc2, enc1, unenc1 = enc1, b, t
+    return "".join("%02X" % x for x in out)
+
+
 def _build_project_stream(modules):
-    lines = ['ID="{%s}"' % str(uuid.uuid4()).upper()]
+    project_id = "{%s}" % str(uuid.uuid4()).upper()
+    lines = ['ID="%s"' % project_id]
     for name, mtype, _ in modules:
         lines.append(("Document=%s/&H00000000" if mtype == "doc" else "Module=%s") % name)
     lines += [
         'Name="%s"' % PROJECT_NAME,
         'HelpContextID="0"',
         'VersionCompatible32="393222000"',
-        'CMG="5E5C5EE2A21E6422642264226422"',
-        'DPB="ACAEAC10D4CFD5CFD5CF"',
-        'GC="ECEEEC50140F150F15F0"',
+        'CMG="%s"' % _encrypt(b"\x00\x00\x00\x00", project_id, 0x5E),   # 保護状態：なし
+        'DPB="%s"' % _encrypt(b"\x00", project_id, 0xAC),               # パスワード：なし
+        'GC="%s"' % _encrypt(b"\xFF", project_id, 0xEC),                # 表示状態：表示
         "",
         "[Host Extender Info]",
         "&H00000001={3832D640-CF90-11CF-8E43-00A0C911005A};VBE;&H00000000",
