@@ -8,7 +8,7 @@ Option Explicit
 '   業者ごとに1行へまとめ、工種を「、」などの区切りで結合して出力します。
 '
 '   想定している表（見出しは 2 行目、A 列は余白）
-'     B:工種  C:業者  D:担当者  E:メールアドレス  F:依頼  G:返答  H:見積書
+'     B:工種  C:会社名（業者）  D:担当者  E:メールアドレス  F:依頼  G:返答  H:見積書
 '     I:お礼  J:見積入力  K:経過連絡  L:備考  M:NET金額（合計）
 '
 '   例）
@@ -49,11 +49,11 @@ Private Const OUTPUT_SHEET As String = "Sheet1"
 ' 見出し行の行番号（依頼リスト・Sheet1 とも同じ行に見出しがある前提）
 Private Const HEADER_ROW As Long = 2
 
-' 業者名の列。見出しの文字列（例 "業者"）か、列記号（例 "C"）のどちらでも可
-Private Const COMPANY_COL As String = "業者"
+' 業者名の列。見出しの文字列か列記号（例 "C"）。候補をカンマ区切りで複数書ける（先に見つかったものを使う）
+Private Const COMPANY_COL As String = "会社名,業者"
 
-' 工種の列。見出しの文字列（例 "工種"）か、列記号（例 "B"）のどちらでも可
-Private Const WORKTYPE_COL As String = "工種"
+' 工種の列。見出しの文字列か列記号（例 "B"）。候補をカンマ区切りで複数書ける
+Private Const WORKTYPE_COL As String = "工種,工事種"
 
 ' 工種をつなぐ区切り文字（セル内改行にしたいときは vbLf）
 Private Const DELIMITER As String = "、"
@@ -794,22 +794,32 @@ End Function
 
 ' 見出し文字列または列記号から、src 配列上の列番号を得る（見つからなければ 0）
 Private Function ResolveColumn(ByVal ws As Worksheet, ByRef hdr As Variant, _
-                               ByVal firstCol As Long, ByVal spec As String) As Long
-    Dim c As Long
-    For c = 1 To UBound(hdr, 2)
-        If HeaderText(hdr(1, c)) = HeaderText(spec) Then
-            ResolveColumn = c
+                               ByVal firstCol As Long, ByVal specList As String) As Long
+    ' specList はカンマ区切りの候補。見出し文字列の一致 → 列記号の順に、先に見つかったものを返す
+    Dim specs() As String, i As Long, c As Long, spec As String, sheetCol As Long
+    specs = Split(Replace(specList, "，", ","), ",")
+    For i = LBound(specs) To UBound(specs)
+        spec = Trim$(specs(i))
+        If Len(spec) > 0 Then
+            For c = 1 To UBound(hdr, 2)
+                If HeaderText(hdr(1, c)) = HeaderText(spec) Then
+                    ResolveColumn = c
+                    Exit Function
+                End If
+            Next c
+        End If
+    Next i
+    For i = LBound(specs) To UBound(specs)
+        spec = Trim$(specs(i))
+        sheetCol = 0
+        On Error Resume Next
+        sheetCol = ws.Columns(spec).Column
+        On Error GoTo 0
+        If sheetCol >= firstCol And sheetCol - firstCol + 1 <= UBound(hdr, 2) And sheetCol > 0 Then
+            ResolveColumn = sheetCol - firstCol + 1
             Exit Function
         End If
-    Next c
-
-    Dim sheetCol As Long
-    On Error Resume Next
-    sheetCol = ws.Columns(spec).Column
-    On Error GoTo 0
-    If sheetCol >= firstCol And sheetCol - firstCol + 1 <= UBound(hdr, 2) Then
-        ResolveColumn = sheetCol - firstCol + 1
-    End If
+    Next i
 End Function
 
 ' カンマ区切りの見出し名リストに該当する列へ mode を設定する

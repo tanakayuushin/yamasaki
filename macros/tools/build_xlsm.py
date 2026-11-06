@@ -2,7 +2,8 @@
 """
 元の .xlsx に VBA 標準モジュール（.bas）を組み込んで .xlsm を作るツール。
 
-  python3 build_xlsm.py 元ブック.xlsx モジュール.bas 出力.xlsm [実行するSub名 ボタンの文字]
+  python3 build_xlsm.py 元ブック.xlsx モジュール.bas 出力.xlsm [実行するSub名 ボタンの文字] [--no-button-on シート名,...]
+  （モジュール.bas はカンマ区切りで複数指定できる）
   （ボタンを複数置くときは "Sub名1;Sub名2" "文字1;文字2" のように ; で区切る）
 
 最後の 2 つを指定すると、各シートの表の右側（O2 付近）に
@@ -366,11 +367,13 @@ DOC_HEADER = (
 )
 
 
-def build_vba_project(std_name, std_source, sheet_codenames):
+def build_vba_project(std_modules, sheet_codenames):
+    """std_modules は [(モジュール名, ソース), ...]"""
     modules = [("ThisWorkbook", "doc", DOC_HEADER.format(name="ThisWorkbook", guid="00020819-0000-0000-C000-000000000046"))]
     for cn in sheet_codenames:
         modules.append((cn, "doc", DOC_HEADER.format(name=cn, guid="00020820-0000-0000-C000-000000000046")))
-    modules.append((std_name, "std", std_source))
+    for std_name, std_source in std_modules:
+        modules.append((std_name, "std", std_source))
 
     references = [
         ("stdole", r"*\G{00020430-0000-0000-C000-000000000046}#2.0#0#C:\Windows\System32\stdole2.tlb#OLE Automation"),
@@ -455,8 +458,10 @@ def load_bas(path):
     return name, src
 
 
-def build_xlsm(src_xlsx, bas_path, out_xlsm, buttons=None):
-    mod_name, mod_src = load_bas(bas_path)
+def build_xlsm(src_xlsx, bas_path, out_xlsm, buttons=None, no_button_sheets=()):
+    """bas_path はカンマ区切りで複数指定できる。no_button_sheets に入れたシート名にはボタンを置かない"""
+    std_modules = [load_bas(bp.strip()) for bp in bas_path.split(",") if bp.strip()]
+    mod_name = ",".join(m[0] for m in std_modules)
     zin = zipfile.ZipFile(src_xlsx)
     names = zin.namelist()
 
@@ -496,19 +501,30 @@ def build_xlsm(src_xlsx, bas_path, out_xlsm, buttons=None):
     rels = zin.read("xl/_rels/workbook.xml.rels").decode("utf-8")
     ids = [int(x) for x in re.findall(r'Id="rId(\d+)"', rels)]
     rid = "rId%d" % (max(ids) + 1 if ids else 1)
-    rels = rels.replace("</Relationships>",
-        '<Relationship Id="%s" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/></Relationships>' % rid)
+    if "relationships/vbaProject" not in rels:
+        rels = rels.replace("</Relationships>",
+            '<Relationship Id="%s" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/></Relationships>' % rid)
     patched["xl/_rels/workbook.xml.rels"] = rels
 
     if buttons:
-        for sf in sheet_files:   # すべてのシートにボタンを置く（どのシートからでも実行できるように）
-            add_button(zin, names, patched, sf, buttons)
+        sheet_names = dict(re.findall(r'<sheet [^>]*name="([^"]+)"[^>]*r:id="([^"]+)"', wb_xml))
+        rels = zin.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+        rid_to_target = dict(re.findall(r'Id="([^"]+)"[^>]*Target="([^"]+)"', rels))
+        skip_files = set()
+        for nm, rid in sheet_names.items():
+            if nm in no_button_sheets and rid in rid_to_target:
+                skip_files.add("xl/" + rid_to_target[rid].lstrip("/").replace("xl/", "", 1))
+        for sf in sheet_files:   # 指定シート以外すべてにボタンを置く（どのシートからでも実行できるように）
+            if sf not in skip_files:
+                add_button(zin, names, patched, sf, buttons)
 
-    vba_bin = build_vba_project(mod_name, mod_src, codenames)
+    vba_bin = build_vba_project(std_modules, codenames)
 
     with zipfile.ZipFile(out_xlsm, "w", zipfile.ZIP_DEFLATED) as zout:
         written = set()
         for item in zin.infolist():
+            if item.filename == "xl/vbaProject.bin":
+                continue  # 元ブックの VBA プロジェクトは、ここで作り直すものに置き換える
             data = patched.get(item.filename, None)
             if data is None:
                 zout.writestr(item, zin.read(item.filename))
@@ -523,6 +539,13 @@ def build_xlsm(src_xlsx, bas_path, out_xlsm, buttons=None):
 
 
 if __name__ == "__main__":
+    args = sys.argv[1:]
+    no_btn = ()
+    if "--no-button-on" in args:
+        i = args.index("--no-button-on")
+        no_btn = tuple(args[i + 1].split(","))
+        del args[i:i + 2]
+    sys.argv = [sys.argv[0]] + args
     if len(sys.argv) not in (4, 6):
         print(__doc__)
         sys.exit(1)
@@ -535,5 +558,5 @@ if __name__ == "__main__":
         for i, m in enumerate(macros):
             lab = labels[i] if i < len(labels) and labels[i] else m
             buttons.append((m.strip(), lab.strip()))
-    name, cns = build_xlsm(sys.argv[1], sys.argv[2], sys.argv[3], buttons)
+    name, cns = build_xlsm(sys.argv[1], sys.argv[2], sys.argv[3], buttons, no_btn)
     print("作成しました:", sys.argv[3], "モジュール:", name, "シート:", cns)
