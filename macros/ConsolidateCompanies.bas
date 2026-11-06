@@ -199,6 +199,10 @@ Private Sub Consolidate(ByVal extraKeyCols As String)
     Dim out() As Variant
     ReDim out(1 To UBound(src, 1), 1 To nCols + 1)
     Dim outCount As Long
+    Dim companyOf() As String          ' 出力行ごとの業者キー（同じ業者の行を連続させるため）
+    ReDim companyOf(1 To UBound(src, 1))
+    Dim firstName As Collection        ' 業者キー → 最初に出てきた表記（行を分けても業者名の表記をそろえる）
+    Set firstName = New Collection
 
     Dim r As Long, c As Long, key As String, idx As Long
     Dim company As String, work As String, nDataRows As Long
@@ -217,6 +221,12 @@ Private Sub Consolidate(ByVal extraKeyCols As String)
                 '---- 初出：その行を丸ごとコピー ----
                 outCount = outCount + 1
                 dict.Add outCount, key
+                companyOf(outCount) = NormalizeKey(company)
+                If CollHas(firstName, companyOf(outCount)) Then
+                    company = firstName(companyOf(outCount))
+                Else
+                    firstName.Add company, companyOf(outCount)
+                End If
                 For c = 1 To nCols
                     out(outCount, c) = src(r, c)
                 Next c
@@ -259,6 +269,25 @@ Private Sub Consolidate(ByVal extraKeyCols As String)
         MsgBox "「" & INPUT_SHEET & "」に業者名が入力された行がありません。", vbExclamation
         Exit Sub
     End If
+
+    '---- 出力順：同じ業者の行が連続するように並べ替える（業者は初出順、同じ業者の中も初出順） ----
+    Dim ord() As Long, placed() As Boolean, k As Long, m As Long
+    ReDim ord(1 To outCount)
+    ReDim placed(1 To outCount)
+    k = 0
+    For r = 1 To outCount
+        If Not placed(r) Then
+            For m = r To outCount
+                If Not placed(m) Then
+                    If companyOf(m) = companyOf(r) Then
+                        k = k + 1
+                        ord(k) = m
+                        placed(m) = True
+                    End If
+                End If
+            Next m
+        End If
+    Next r
 
     '---- 内訳列：2 件以上ある業者は「工種：金額」を 1 行ずつ並べ、最後に合計を付ける ----
     For c = 1 To nCols
@@ -356,7 +385,7 @@ Private Sub Consolidate(ByVal extraKeyCols As String)
     For c = 1 To nCols
         If colMap(c) > 0 Then
             For r = 1 To outCount
-                colVals(r, 1) = out(r, c)
+                colVals(r, 1) = out(ord(r), c)
             Next r
             wsOut.Range(wsOut.Cells(HEADER_ROW + 1, colMap(c)), wsOut.Cells(HEADER_ROW + outCount, colMap(c))).Value = colVals
         End If
@@ -371,7 +400,7 @@ Private Sub Consolidate(ByVal extraKeyCols As String)
         Application.CutCopyMode = False
         wsOut.Cells(HEADER_ROW, cntCol).Value = "元の行数"
         For r = 1 To outCount
-            wsOut.Cells(HEADER_ROW + r, cntCol).Value = out(r, nCols + 1)
+            wsOut.Cells(HEADER_ROW + r, cntCol).Value = out(ord(r), nCols + 1)
         Next r
         wsOut.Columns(cntCol).ColumnWidth = 9
     End If
@@ -384,7 +413,7 @@ Private Sub Consolidate(ByVal extraKeyCols As String)
     If WRAP_WORKTYPE Then
         wsOut.Range(wsOut.Cells(HEADER_ROW + 1, colMap(colWork)), wsOut.Cells(HEADER_ROW + outCount, colMap(colWork))).WrapText = True
         For r = 1 To outCount
-            If DisplayWidth(CStr(out(r, colWork))) > workColWidth Then needFit(r) = True
+            If DisplayWidth(CStr(out(ord(r), colWork))) > workColWidth Then needFit(r) = True
         Next r
     End If
 
@@ -393,7 +422,7 @@ Private Sub Consolidate(ByVal extraKeyCols As String)
         If mode(c) = 3 And colMap(c) > 0 Then
             wsOut.Range(wsOut.Cells(HEADER_ROW + 1, colMap(c)), wsOut.Cells(HEADER_ROW + outCount, colMap(c))).WrapText = True
             For r = 1 To outCount
-                If InStr(CStr(out(r, c)), vbLf) > 0 Then needFit(r) = True
+                If InStr(CStr(out(ord(r), c)), vbLf) > 0 Then needFit(r) = True
             Next r
         End If
     Next c
@@ -401,7 +430,7 @@ Private Sub Consolidate(ByVal extraKeyCols As String)
         If mode(c) = 2 And colMap(c) > 0 Then
             If wsOut.Cells(HEADER_ROW + 1, colMap(c)).WrapText Then
                 For r = 1 To outCount
-                    If InStr(CStr(out(r, c)), JOIN_DELIMITER) > 0 Then needFit(r) = True
+                    If InStr(CStr(out(ord(r), c)), JOIN_DELIMITER) > 0 Then needFit(r) = True
                 Next r
             End If
         End If
