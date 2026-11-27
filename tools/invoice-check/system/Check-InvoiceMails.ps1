@@ -85,6 +85,43 @@ function Find-FirstWord {
     return ''
 }
 
+# 文字の中に出てくる言葉の一覧（「御請求書」と「請求書」のように重なるものは長い方だけ）
+function Find-MatchedWords {
+    param([string]$Text, [object[]]$Words)
+    if ([string]::IsNullOrEmpty($Text) -or -not $Words) { return @() }
+    $hits = @()
+    foreach ($w in $Words) { if ($w -and $Text.IndexOf([string]$w, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $hits += [string]$w } }
+    $seen = @{}; $out = @()
+    foreach ($h in $hits) {
+        $k = $h.ToLower()
+        if ($seen.ContainsKey($k)) { continue }
+        if (@($hits | Where-Object { $_.Length -gt $h.Length -and $_.ToLower().Contains($k) }).Count -gt 0) { continue }
+        $seen[$k] = $true
+        $out += $h
+    }
+    return $out
+}
+
+# 返信の引用部分を除いた、新しく書かれた本文（転送メールは転送された中身が本題なので全部）
+function Get-NewBodyPart {
+    param([string]$Body, [string]$Subject)
+    if ([string]::IsNullOrEmpty($Body)) { return '' }
+    if ($Subject -match '^\s*(FW|Fwd|転送)\s*[:：]') { return $Body }
+    $patterns = @(
+        '(?m)^\s*-{2,}\s*(Original Message|元のメッセージ)\s*-{2,}',
+        '(?m)^\s*_{10,}\s*$',
+        '(?m)^\s*(差出人|From)\s*[:：]',
+        '(?m)^.{0,100}(さんは書きました|wrote)\s*[:：]\s*$',
+        '(?m)^\s*>'
+    )
+    $cut = $Body.Length
+    foreach ($p in $patterns) {
+        $m = [regex]::Match($Body, $p)
+        if ($m.Success -and $m.Index -gt 0 -and $m.Index -lt $cut) { $cut = $m.Index }
+    }
+    return $Body.Substring(0, $cut)
+}
+
 function Test-MatchAny {
     param([string]$Text, [object[]]$Patterns)
     if ([string]::IsNullOrEmpty($Text) -or -not $Patterns) { return $false }
@@ -1112,13 +1149,18 @@ try {
                     $attNames = (@($atts | ForEach-Object { $_.Name })) -join ' '
 
                     # --- 請求書メールかどうか ---
-                    $reasons = @()
-                    if (Test-ContainsAny $subject $Det.Keywords) { $reasons += '件名' }
-                    if (Test-ContainsAny $attNames $Det.Keywords) { $reasons += '添付ファイル名' }
-                    if (Test-ContainsAny $body $Det.Keywords) { $reasons += '本文' }
+                    #   件名・添付ファイル名・添付の中身で見つけた → 確か（$strong）。本文だけ → 後で業者一覧と合わせて判断
+                    $newBody = Get-NewBodyPart $body $subject   # 返信の引用部分は除く
+                    $reasons = @(); $strong = $false
+                    $w = @(Find-MatchedWords $subject $Det.Keywords)
+                    if ($w.Count -gt 0) { $reasons += "件名：$($w -join '・')"; $strong = $true }
+                    $w = @(Find-MatchedWords $attNames $Det.Keywords)
+                    if ($w.Count -gt 0) { $reasons += "添付ファイル名：$($w -join '・')"; $strong = $true }
+                    $w = @(Find-MatchedWords $newBody $Det.Keywords)
+                    if ($w.Count -gt 0) { $reasons += "本文：$($w -join '・')" }
                     $notes = @()
-                    if ($reasons.Count -eq 0 -and $Insp.Enabled -and $atts.Count -gt 0) {
-                        # 件名・本文・添付ファイル名に言葉がなければ、添付の中身を確認
+                    if (-not $strong -and $Insp.Enabled -and $atts.Count -gt 0) {
+                        # 件名・添付ファイル名に言葉がなければ、添付の中身を確認
                         $checked = 0
                         foreach ($a in $atts) {
                             if ($checked -ge [int]$Insp.MaxAttachmentsPerMail) { break }
@@ -1126,7 +1168,7 @@ try {
                             $checked++
                             $f = Get-AttachmentFinding $a ([datetime]$mail.ReceivedTime)
                             if ($f.Note) { $notes += "$($a.Name)：$($f.Note)" }
-                            if ($f.Found) { $a.IsInvoice = $true; $reasons += "添付の中身（$($f.How)で$($f.Found)）"; break }
+                            if ($f.Found) { $a.IsInvoice = $true; $reasons += "添付の中身（$($f.How)で$($f.Found)）"; $strong = $true; break }
                         }
                     }
                     if ($reasons.Count -eq 0) { continue }
@@ -1143,7 +1185,7 @@ try {
                         }
                     }
                     $links = @()
-                    $links = @(Get-InvoiceLinks $body $htmlBody)   # 添付があってもリンクも見る（請求書がリンクで届き、添付は別の書類のこともあるため）
+                    $links = @(Get-InvoiceLinks $newBody $htmlBody)   # 添付があってもリンクも見る（請求書がリンクで届き、添付は別の書類のこともあるため）
                     if ($atts.Count -eq 0 -and $links.Count -eq 0 -and $warn.Count -eq 0) { continue }
 
                     # --- 基本情報 ---
@@ -1155,6 +1197,7 @@ try {
                     $isSpecial = ($spKeys.Count -gt 0) -and ((Test-ContainsAny "$subject $attNames $senderNm" $spKeys) -or (Test-ContainsAny $body $spKeys))
                     $isAuto    = Test-MatchAny $senderAdr $Rules.AutoMailSenderPatterns
                     $listed    = Find-ListedVendor $senderAdr $senderNm $body
+                    $isWeak    = (-not $strong) -and -not ([string]$listed -like 'あり*')   # 本文だけで見つけ、業者一覧にもない差出人
                     $bankWord  = Find-FirstWord (ConvertTo-MatchText "$subject $body") @($Caution.BankChangeKeywords | ForEach-Object { ConvertTo-MatchText $_ })
                     if ($bankWord) { $warn += "振込先・口座の変更に関する記載（「$bankWord」）" }
 
@@ -1339,6 +1382,10 @@ try {
 
                     if ($isExcluded) { $result = '対象外'; $todo = @() }
                     elseif ($warn.Count -gt 0) { $result = '要注意' }
+                    elseif ($isWeak -and $stage -eq '未対応') {
+                        $result = '請求書か要確認'
+                        $todo = @('メールを開いて請求書か確認（請求書でなければ分類項目「対象外」を付ける）')
+                    }
                     elseif ($stage -eq '完了' -and $todo.Count -eq 0) { $result = 'OK' }
                     elseif ($stage -ne '未対応' -and @($todo | Where-Object { $_ -ne '2人目の確認待ち' }).Count -gt 0) { $result = '漏れあり' }
                     else { $result = '対応待ち' }
@@ -1437,9 +1484,10 @@ $Groups = [ordered]@{
     '要注意'   = @{ Rank = 0; Css = 'g-alert'; Desc = '振込先変更の記載や危険な添付がある。返信・格納・振込の前に、電話などで取引先に確認' }
     '漏れあり' = @{ Rank = 1; Css = 'g-miss';  Desc = '確認済みなのに、コピー・格納・返信・フラグのどれかが足りない' }
     'エラー'   = @{ Rank = 2; Css = 'g-error'; Desc = 'ツールで確認できなかった。メールを直接確認' }
-    '対応待ち' = @{ Rank = 3; Css = 'g-wait';  Desc = '1人目・2人目の確認待ち（いつもどおり対応）' }
-    'OK'       = @{ Rank = 4; Css = 'g-ok';    Desc = '2人の確認が済み、すべて揃っている' }
-    '対象外'   = @{ Rank = 5; Css = 'g-skip';  Desc = '分類項目「対象外」が付いている' }
+    '請求書か要確認' = @{ Rank = 3; Css = 'g-maybe'; Desc = '本文にだけ「請求書」などがあり、差出人も業者一覧にない。請求書かどうかメールを開いて確認' }
+    '対応待ち' = @{ Rank = 4; Css = 'g-wait';  Desc = '1人目・2人目の確認待ち（いつもどおり対応）' }
+    'OK'       = @{ Rank = 5; Css = 'g-ok';    Desc = '2人の確認が済み、すべて揃っている' }
+    '対象外'   = @{ Rank = 6; Css = 'g-skip';  Desc = '分類項目「対象外」が付いている' }
 }
 $sorted = @($results | Sort-Object @{ Expression = { $Groups[[string]$_.結果].Rank } }, @{ Expression = { $_.受信日時 }; Descending = $true })
 
@@ -1466,11 +1514,11 @@ function New-Chip {
 $counts = @{}
 foreach ($g in $Groups.Keys) { $counts[$g] = 0 }
 foreach ($r in $sorted) { if ($counts.ContainsKey([string]$r.結果)) { $counts[[string]$r.結果]++ } }
-$todoCount = $counts['要注意'] + $counts['漏れあり'] + $counts['エラー'] + $counts['対応待ち']
+$todoCount = $counts['要注意'] + $counts['漏れあり'] + $counts['エラー'] + $counts['請求書か要確認'] + $counts['対応待ち']
 # 保管が未のもの：確認の段階に関係なく、請求書のファイルが格納されていない（済・不備以外）もの
 function Test-StoreMissing {
     param($Row)
-    if ([string]$Row.結果 -eq '対象外' -or [string]$Row.結果 -eq 'エラー') { return $false }
+    if (@('対象外', 'エラー', '請求書か要確認') -contains [string]$Row.結果) { return $false }
     $v = [string]$Row.格納
     return -not ($v -like '済*' -or $v -like '不備*')
 }
@@ -1478,7 +1526,7 @@ $storeMissingCount = @($sorted | Where-Object { Test-StoreMissing $_ }).Count
 # 業者一覧にない業者から届いた請求書メール（対象外・エラーは除く）
 function Test-NotListed {
     param($Row)
-    if ([string]$Row.結果 -eq '対象外' -or [string]$Row.結果 -eq 'エラー') { return $false }
+    if (@('対象外', 'エラー', '請求書か要確認') -contains [string]$Row.結果) { return $false }
     return ([string]$Row.業者一覧 -eq 'なし')
 }
 $notListedCount = @($sorted | Where-Object { Test-NotListed $_ }).Count
@@ -1518,7 +1566,7 @@ main{max-width:1100px;margin:0 auto;padding:16px}
 .chip.warn{border-color:var(--warn);color:var(--warn)}.chip.none{color:var(--sub)}
 details{margin-top:8px}summary{cursor:pointer;color:var(--sub);font-size:13px}
 dl{display:grid;grid-template-columns:130px 1fr;gap:4px 12px;margin:8px 0 0;font-size:13px}dt{color:var(--sub)}dd{margin:0;word-break:break-all}
-.g-alert{--c:var(--alert)}.g-miss{--c:var(--miss)}.g-error{--c:var(--error)}.g-wait{--c:var(--wait)}.g-ok{--c:var(--ok)}.g-skip{--c:var(--skip)}
+.g-maybe{--c:var(--warn)}.g-alert{--c:var(--alert)}.g-miss{--c:var(--miss)}.g-error{--c:var(--error)}.g-wait{--c:var(--wait)}.g-ok{--c:var(--ok)}.g-skip{--c:var(--skip)}
 .legend{background:var(--card);border-radius:10px;padding:12px 16px;margin-top:20px;font-size:14px}
 .legend table{border-collapse:collapse;width:100%}.legend td{border-top:1px solid var(--line);padding:6px 8px;vertical-align:top}
 #empty{color:var(--sub);text-align:center;padding:30px}a{color:inherit}
@@ -1588,7 +1636,7 @@ foreach ($g in $Groups.Keys) { [void]$sb.Append("<tr><td class=""$($Groups[$g].C
   var items=[].slice.call(document.querySelectorAll('.item'));
   var btns=[].slice.call(document.querySelectorAll('[data-filter]'));
   var q=document.getElementById('q'), cur='todo';
-  var todo=['要注意','漏れあり','エラー','対応待ち'];
+  var todo=['要注意','漏れあり','エラー','請求書か要確認','対応待ち'];
   function apply(){
     var t=q.value.trim().toLowerCase(), n=0;
     items.forEach(function(it){
@@ -1618,7 +1666,7 @@ Write-Host ('請求書メール   : {0} 件' -f $sorted.Count)
 foreach ($g in $Groups.Keys) {
     if ($counts[$g] -eq 0) { continue }
     $color = 'Gray'
-    if ($g -eq '要注意') { $color = 'Red' } elseif ($g -eq '漏れあり') { $color = 'Yellow' } elseif ($g -eq 'エラー') { $color = 'Magenta' } elseif ($g -eq 'OK') { $color = 'Green' }
+    if ($g -eq '要注意') { $color = 'Red' } elseif ($g -eq '漏れあり' -or $g -eq '請求書か要確認') { $color = 'Yellow' } elseif ($g -eq 'エラー') { $color = 'Magenta' } elseif ($g -eq 'OK') { $color = 'Green' }
     Write-Host ('  {0} : {1} 件' -f $g, $counts[$g]) -ForegroundColor $color
 }
 if ((Get-VendorList).Count -gt 0) { Write-Host ('  （一覧にない業者 : {0} 件）' -f $notListedCount) -ForegroundColor $(if ($notListedCount) { 'Yellow' } else { 'Gray' }) }
