@@ -220,22 +220,98 @@ function Find-SpecialFolders {
     }
 }
 
-# 推測した月以外も探すための範囲：受信した年と前の年の、すべての月フォルダ（特定案件はその中の専用フォルダ）
-$script:WideCache = @{}
-function Get-WideFolders {
-    param([datetime]$Received, [bool]$Special)
-    $key = "$($Received.Year)|$Special"
-    if ($script:WideCache.ContainsKey($key)) { return $script:WideCache[$key] }
-    $list = @()
-    $root = [string]$Storage.RootPath
-    if (Test-Path -LiteralPath $root -PathType Container) {
-        $years = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
-                   Where-Object { $_.Name -match ('^(' + $Received.Year + '|' + ($Received.Year - 1) + ')(?!\d)') })
-        $months = @(foreach ($y in $years) { Get-ChildItem -LiteralPath $y.FullName -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName } })
-        if ($Special) { $list = @(Find-SpecialFolders $months) } else { $list = $months }
+# ---------------------------------------------------------------------------
+# 格納場所全体（Storage.RootPath の下のすべてのファイル）との照合
+# ---------------------------------------------------------------------------
+$script:AllStorageFiles = $null
+function Get-AllStorageFiles {
+    if ($null -eq $script:AllStorageFiles) {
+        $root = [string]$Storage.RootPath
+        if (Test-Path -LiteralPath $root -PathType Container) {
+            Write-Host '格納場所のファイル一覧を読み込み中...'
+            $script:AllStorageFiles = @(Get-ChildItem -LiteralPath $root -File -Recurse -ErrorAction SilentlyContinue)
+        } else { $script:AllStorageFiles = @() }
     }
-    $script:WideCache[$key] = $list
-    return $list
+    return $script:AllStorageFiles
+}
+
+# 中身が完全に同じファイルを、格納場所全体から探す（大きさが同じファイルだけ計算するので速い）
+$script:StoredHash = @{}
+function Find-ExactAnywhere {
+    param([string]$TempFile)
+    $hash = Get-FileSha256 $TempFile
+    $size = (Get-Item -LiteralPath $TempFile).Length
+    foreach ($file in (Get-AllStorageFiles)) {
+        if ($file.Length -ne $size) { continue }
+        if (-not $script:StoredHash.ContainsKey($file.FullName)) {
+            try { $script:StoredHash[$file.FullName] = Get-FileSha256 $file.FullName } catch { $script:StoredHash[$file.FullName] = '' }
+        }
+        if ($script:StoredHash[$file.FullName] -eq $hash) { return $file.FullName }
+    }
+    return ''
+}
+
+# 内容で照合する相手：請求月（とその前後）のフォルダのPDF ＋ ファイル名に取引先名が入ったPDF
+function Get-ContentCandidates {
+    param([datetime[]]$Months, [string[]]$VendorKeys)
+    $pdfs = @(Get-AllStorageFiles | Where-Object { $_.Extension -ieq '.pdf' })
+    $list = [ordered]@{}
+    $range = [int]$Storage.ContentMatch.MonthRange
+    foreach ($mo in @($Months)) {
+        for ($o = -$range; $o -le $range; $o++) {
+            foreach ($mf in @(Find-MonthFolders $mo.AddMonths($o))) {
+                foreach ($p in $pdfs) {
+                    if ($p.FullName.StartsWith($mf + '\', [StringComparison]::OrdinalIgnoreCase) -and -not $list.Contains($p.FullName)) { $list[$p.FullName] = $p }
+                }
+            }
+        }
+    }
+    $kws = @($VendorKeys | ForEach-Object { ConvertTo-MatchText $_ } | Where-Object { $_ })
+    if ($kws.Count -gt 0) {
+        foreach ($p in $pdfs) {
+            if (-not $list.Contains($p.FullName) -and (Test-ContainsAny (ConvertTo-MatchText $p.Name) $kws)) { $list[$p.FullName] = $p }
+        }
+    }
+    return @($list.Values | Select-Object -First ([int]$Storage.ContentMatch.MaxCandidates))
+}
+
+# 格納場所のPDFの照合用の情報（文字認識。結果はファイルの場所・大きさ・更新日時ごとに記録し、次回は読み直さない）
+$script:ContentOcrCount = 0
+function Get-StoredFeatures {
+    param($File)
+    $key = 'feat|' + $File.FullName + '|' + $File.Length + '|' + $File.LastWriteTimeUtc.Ticks
+    if ($script:InspectCache.ContainsKey($key)) { return [string]$script:InspectCache[$key] }
+    if (-not (Initialize-Ocr)) { return $null }
+    $feat = ''
+    $tmp = Join-Path $TempDir ([Guid]::NewGuid().ToString('N') + '.pdf')
+    try {
+        Copy-Item -LiteralPath $File.FullName -Destination $tmp
+        $feat = Get-InvoiceFeatures (Get-OcrText $tmp 'PDF') $File.LastWriteTime
+    } catch { $feat = '' }
+    finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    $script:InspectCache[$key] = $feat
+    $script:ContentOcrCount++
+    if (($script:ContentOcrCount % 20) -eq 0) { Write-Host "  格納場所のPDFを文字認識中... $($script:ContentOcrCount) 件" }
+    return $feat
+}
+
+function Find-ContentMatch {
+    param([string]$Feat, $Candidates)
+    $a = ConvertFrom-Features $Feat
+    if (-not (Test-UsableFeatures $a)) { return '' }
+    foreach ($c in @($Candidates)) {
+        $fs = Get-StoredFeatures $c
+        if ($null -eq $fs) { return '' }   # 文字認識が使えない
+        if (-not $fs) { continue }
+        if (Test-SameInvoice $a (ConvertFrom-Features $fs)) { return $c.FullName }
+    }
+    return ''
+}
+
+function Test-InFolders {
+    param([string]$Path, [string[]]$Folders)
+    foreach ($f in @($Folders)) { if ($f -and $Path.StartsWith($f + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true } }
+    return $false
 }
 
 $script:FolderCache = @{}
@@ -483,7 +559,7 @@ $DatePatterns = @(
     '(?<![\d\-/.])(?<y>20\d{2})[/.\-](?<m>\d{1,2})[/.\-](?<d>\d{1,2})(?!\d)',
     '(?<![A-Za-z\d])R(?<r>\d{1,2})[/.\-](?<m>\d{1,2})[/.\-](?<d>\d{1,2})(?!\d)'
 )
-function Find-InvoiceMonth {
+function Find-InvoiceDate {
     param([string]$Text, [datetime]$Received)
     $t = ConvertTo-MatchText $Text
     if (-not $t) { return $null }
@@ -500,18 +576,85 @@ function Find-InvoiceMonth {
             $mo = ConvertTo-Int $m.Groups['m'].Value
             $d  = ConvertTo-Int $m.Groups['d'].Value
             if ($y -lt 2000 -or $y -gt 2100 -or $mo -lt 1 -or $mo -gt 12 -or $d -lt 1 -or $d -gt 31) { continue }
-            $dt = (Get-Date -Year $y -Month $mo -Day 1).Date
+            try { $dt = (Get-Date -Year $y -Month $mo -Day $d).Date } catch { continue }   # 11月31日などはない日付
             if ([Math]::Abs(($dt - $Received.Date).TotalDays) -gt 400) { continue }   # 受信日から離れすぎた日付は使わない
             $from = [Math]::Max(0, $m.Index - 12)
             $ctx = $t.Substring($from, $m.Index - $from)
             if (Test-ContainsAny $ctx $excludes) { continue }
-            $cands += [pscustomobject]@{ Month = $dt; Pos = $m.Index; Labeled = (Test-ContainsAny $ctx $labels) }
+            $cands += [pscustomobject]@{ Date = $dt; Pos = $m.Index; Labeled = (Test-ContainsAny $ctx $labels) }
         }
     }
     if ($cands.Count -eq 0) { return $null }
     $pick = @($cands | Where-Object { $_.Labeled } | Sort-Object Pos) | Select-Object -First 1
     if (-not $pick) { $pick = @($cands | Sort-Object Pos) | Select-Object -First 1 }
-    return $pick.Month
+    return $pick.Date
+}
+
+# ---------------------------------------------------------------------------
+# 内容での照合用の情報（登録番号・請求金額・請求書の日付）
+# ---------------------------------------------------------------------------
+$AmountLabels  = @('ご請求金額', '御請求金額', '請求金額', '今回ご請求額', 'ご請求額', '請求額', '税込合計', '合計金額', '総合計', '合計')
+$AmountPattern = '[¥\\]?(\d{1,3}(?:[,.]\d{3})+|\d{4,9})'
+function Find-TotalAmount {
+    param([string]$t)
+    foreach ($lab in $AmountLabels) {
+        $i = $t.IndexOf($lab, [StringComparison]::Ordinal)
+        while ($i -ge 0) {
+            $start = $i + $lab.Length
+            $after = $t.Substring($start, [Math]::Min(30, $t.Length - $start))
+            $m = [regex]::Match($after, '^.{0,12}?' + $AmountPattern)
+            if ($m.Success) { return [long]($m.Groups[1].Value -replace '[,.]', '') }
+            $i = $t.IndexOf($lab, $i + 1, [StringComparison]::Ordinal)
+        }
+    }
+    # 見出しがなければ、「¥」か「円」が付いた金額のうち一番大きいもの
+    $vals = @()
+    foreach ($m in [regex]::Matches($t, '[¥\\](\d{1,3}(?:[,.]\d{3})+|\d{4,9})')) { $vals += [long]($m.Groups[1].Value -replace '[,.]', '') }
+    foreach ($m in [regex]::Matches($t, '(\d{1,3}(?:[,.]\d{3})+|\d{4,9})円')) { $vals += [long]($m.Groups[1].Value -replace '[,.]', '') }
+    if ($vals.Count -gt 0) { return [long](($vals | Measure-Object -Maximum).Maximum) }
+    return 0
+}
+
+# 文字 → 「登録番号|登録番号;金額;日付」の形の文字列
+function Get-InvoiceFeatures {
+    param([string]$Text, [datetime]$Received)
+    $t = ConvertTo-MatchText $Text
+    if (-not $t) { return '' }
+    $regs = @([regex]::Matches($t, 'T\d{13}') | ForEach-Object { $_.Value } | Select-Object -Unique)
+    $amt  = Find-TotalAmount $t
+    $d    = Find-InvoiceDate $Text $Received
+    $ds = ''
+    if ($d) { $ds = $d.ToString('yyyy-MM-dd') }
+    return (($regs -join '|') + ';' + [string]$amt + ';' + $ds)
+}
+function ConvertFrom-Features {
+    param([string]$s)
+    $p = ([string]$s) -split ';'
+    $o = [pscustomobject]@{ Regs = @(); Amount = [long]0; Date = '' }
+    if ($p.Count -ge 1 -and $p[0]) { $o.Regs = @($p[0] -split '\|' | Where-Object { $_ }) }
+    if ($p.Count -ge 2 -and $p[1]) { $o.Amount = [long]$p[1] }
+    if ($p.Count -ge 3) { $o.Date = [string]$p[2] }
+    return $o
+}
+# 同じ請求書とみなす：金額が一致し、登録番号か日付も一致／または登録番号と日付の両方が一致
+function Test-SameInvoice {
+    param($A, $B)
+    $amt  = ($A.Amount -gt 0 -and $A.Amount -eq $B.Amount)
+    $reg  = (@($A.Regs | Where-Object { $B.Regs -contains $_ }).Count -gt 0)
+    $date = ($A.Date -and $A.Date -eq $B.Date)
+    return (($amt -and ($reg -or $date)) -or ($reg -and $date))
+}
+function Test-UsableFeatures {
+    param($F)
+    return (($F.Amount -gt 0 -and ($F.Regs.Count -gt 0 -or $F.Date)) -or ($F.Regs.Count -gt 0 -and $F.Date))
+}
+
+# 請求書の日付の月（請求月）
+function Find-InvoiceMonth {
+    param([string]$Text, [datetime]$Received)
+    $d = Find-InvoiceDate $Text $Received
+    if ($d) { return (Get-Date -Year $d.Year -Month $d.Month -Day 1).Date }
+    return $null
 }
 
 # 添付1件の中身に請求書らしさがあるか ＋ 請求書の日付の月
@@ -525,10 +668,11 @@ function Get-AttachmentFinding {
     $path = Save-AttTemp $A
     $hash = Get-FileSha256 $path
     $dateKey = "$hash#month"
-    if ($script:InspectCache.ContainsKey($hash) -and $script:InspectCache.ContainsKey($dateKey)) {
+    $featKey = "$hash#feat"
+    if ($script:InspectCache.ContainsKey($hash) -and $script:InspectCache.ContainsKey($dateKey) -and $script:InspectCache.ContainsKey($featKey)) {
         $cm = $null
         if ($script:InspectCache[$dateKey]) { $cm = [datetime]::ParseExact([string]$script:InspectCache[$dateKey], 'yyyy-MM', $null) }
-        return [pscustomobject]@{ Found = [string]$script:InspectCache[$hash]; How = $how; Note = ''; Month = $cm }
+        return [pscustomobject]@{ Found = [string]$script:InspectCache[$hash]; How = $how; Note = ''; Month = $cm; Feat = [string]$script:InspectCache[$featKey] }
     }
     $text = ''; $note = ''; $cache = $true
     try {
@@ -542,13 +686,17 @@ function Get-AttachmentFinding {
         $note = '中身を読めませんでした（パスワード付き・壊れたファイルなど）'; $cache = $false
     }
     $found = Find-InvoiceEvidence $text
-    $month = $null
-    if ($A.Kind -ne 'ZIP') { $month = Find-InvoiceMonth $text $Received }
+    $month = $null; $feat = ''
+    if ($A.Kind -ne 'ZIP') {
+        $month = Find-InvoiceMonth $text $Received
+        $feat  = Get-InvoiceFeatures $text $Received
+    }
     if ($cache) {
         $script:InspectCache[$hash] = $found
         if ($month) { $script:InspectCache[$dateKey] = $month.ToString('yyyy-MM') } else { $script:InspectCache[$dateKey] = '' }
+        $script:InspectCache[$featKey] = $feat
     }
-    return [pscustomobject]@{ Found = $found; How = $how; Note = $note; Month = $month }
+    return [pscustomobject]@{ Found = $found; How = $how; Note = $note; Month = $month; Feat = $feat }
 }
 
 # ---------------------------------------------------------------------------
@@ -926,21 +1074,37 @@ try {
                     }
 
                     $judges = @()
+                    $vendorKeys = @(Get-VendorKeywords $vendor $senderNm)
                     foreach ($a in $files) {
                         $tmp = Save-AttTemp $a
                         $r = [pscustomobject]@{ Result = '未'; How = ''; Path = '' }
-                        if ($searchFolders.Count -gt 0) { $r = Find-StoredFile $tmp $a.Name $searchFolders }
-                        if ($r.Result -ne '済') {
-                            # 推測した月のフォルダになければ、受信した年と前の年のほかの月も探す（中身が同じものだけ）
-                            $rw = Find-StoredFile $tmp $a.Name (Get-WideFolders $received $isSpecial) -HashOnly
-                            if ($rw.Result -eq '済') {
-                                if ($invMonth) { $r = [pscustomobject]@{ Result = '要確認'; How = "請求書の日付の月（$monthText）とは別の月のフォルダにありました"; Path = $rw.Path } }
-                                else { $r = [pscustomobject]@{ Result = '済'; How = "推測した月（$monthText）とは別の月のフォルダにありました"; Path = $rw.Path } }
+                        # ① 中身が完全に同じファイルを、格納場所全体から探す
+                        $hit = Find-ExactAnywhere $tmp
+                        $how = '中身が完全に一致'
+                        # ② なければ、内容（登録番号・金額・日付）が同じPDFを探す
+                        if (-not $hit -and $Storage.ContentMatch.Enabled -and $Insp.Enabled -and $a.Kind -ne 'ZIP' -and [double]$a.Att.Size -le [double]$Insp.MaxFileMB * 1MB) {
+                            $fi = Get-AttachmentFinding $a $received
+                            if ($fi.Feat) {
+                                $hit = Find-ContentMatch $fi.Feat (Get-ContentCandidates $months $vendorKeys)
+                                $how = '内容（登録番号・金額・日付）が一致'
                             }
+                        }
+                        if ($hit) {
+                            if ($searchFolders.Count -gt 0 -and (Test-InFolders $hit $searchFolders)) {
+                                if ($how -like '中身*') { $r = [pscustomobject]@{ Result = '済'; How = $how; Path = $hit } }
+                                else { $r = [pscustomobject]@{ Result = '済(内容一致)'; How = $how; Path = $hit } }
+                            }
+                            elseif ($invMonth) { $r = [pscustomobject]@{ Result = '要確認'; How = "$how。ただし請求書の日付の月（$monthText）とは別のフォルダにありました"; Path = $hit } }
+                            else { $r = [pscustomobject]@{ Result = '済'; How = "$how（推測した月（$monthText）とは別のフォルダ）"; Path = $hit } }
+                        }
+                        elseif ($searchFolders.Count -gt 0) {
+                            # ③ 同じ名前のファイルはあるか
+                            $rn = Find-StoredFile $tmp $a.Name $searchFolders
+                            if ($rn.Result -ne '未') { $r = $rn }
                         }
                         if ($r.Result -eq '未' -and $a.Kind -ne 'PDF' -and $searchFolders.Count -gt 0) {
                             # 画像・Excel などは PDF にして格納されることがある → 取引先名で推定
-                            $r2 = Find-StoredByKeyword (Get-VendorKeywords $vendor $senderNm) $searchFolders
+                            $r2 = Find-StoredByKeyword $vendorKeys $searchFolders
                             if ($r2.Result -like '済*') { $r = $r2 }
                         }
                         $judges += $r.Result
@@ -954,6 +1118,7 @@ try {
                         if ($judges -contains '未') { $storeJudge = '未' }
                         elseif ($judges -contains '要確認') { $storeJudge = '要確認' }
                         elseif ($judges -contains '済(推定)') { $storeJudge = '済(推定)' }
+                        elseif ($judges -contains '済(内容一致)') { $storeJudge = '済(内容一致)' }
                         else { $storeJudge = '済' }
                     }
                     elseif ($mode -eq 'link') {
@@ -961,12 +1126,14 @@ try {
                         if ($searchFolders.Count -gt 0) { $lr = Find-StoredByKeyword (Get-VendorKeywords $vendor $senderNm) $searchFolders }
                         if ($lr.Path) { $storePaths += $lr.Path }
                         if ($judges -contains '済') { $storeJudge = '済' }
+                        elseif ($judges -contains '済(内容一致)') { $storeJudge = '済(内容一致)' }
                         elseif ($lr.Result -like '済*') { $storeJudge = $lr.Result; $storeNote = Join-Notes @($storeNote, $lr.How) }
                         elseif ($judges -contains '要確認' -or $lr.Result -eq '要確認') { $storeJudge = '要確認'; $storeNote = Join-Notes @($storeNote, $lr.How) }
                         else { $storeJudge = '未'; $storeNote = Join-Notes @($storeNote, 'リンク先からダウンロードして格納が必要') }
                     }
                     else {
                         if ($judges -contains '済') { $storeJudge = '済' }
+                        elseif ($judges -contains '済(内容一致)') { $storeJudge = '済(内容一致)' }
                         elseif ($judges -contains '済(推定)') { $storeJudge = '済(推定)' }
                         elseif ($judges -contains '要確認') { $storeJudge = '要確認' }
                         else { $storeJudge = '未' }
@@ -1279,6 +1446,7 @@ if ($fatal) {
     Write-Host "  この結果は、止まるまでに確認できた $mailCount 件分です。Outlook を開いたまま、もう一度実行してください。" -ForegroundColor Red
 }
 if ($script:OcrSkipped -gt 0) { Write-Host ("※ 文字認識を使えなかったため、添付 $($script:OcrSkipped) 件（PDF・画像）の中身を確認できませんでした: " + $script:OcrNote) -ForegroundColor Yellow }
+if ($script:ContentOcrCount -gt 0) { Write-Host "（格納場所のPDF $($script:ContentOcrCount) 件を文字認識しました。結果は記録したので、次回からは速くなります）" }
 Write-Host ''
 Write-Host "結果の画面 : $htmlPath"
 Write-Host "Excel 用   : $csvPath"

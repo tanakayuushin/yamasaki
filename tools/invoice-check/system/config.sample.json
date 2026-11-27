@@ -169,7 +169,12 @@
       0,
       -1
     ],
-    "Recurse": true
+    "Recurse": true,
+    "ContentMatch": {
+      "Enabled": true,
+      "MonthRange": 1,
+      "MaxCandidates": 400
+    }
   },
   "Vendors": [
     {
