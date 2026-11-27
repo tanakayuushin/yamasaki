@@ -648,7 +648,7 @@ function Find-InvoiceDate {
 # ---------------------------------------------------------------------------
 # 内容での照合用の情報（登録番号・請求金額・請求書の日付）
 # ---------------------------------------------------------------------------
-$AmountLabels  = @('ご請求金額', '御請求金額', '請求金額', '今回ご請求額', 'ご請求額', '請求額', '税込合計', '合計金額', '総合計', '合計')
+$AmountLabels  = @('ご請求金額', '御請求金額', '請求金額', '今回ご請求額', 'ご請求額', '請求額', '請求合計', 'お支払金額', 'お支払い金額', 'ご利用金額', '税込合計', '合計金額', '総合計', '合計')
 $AmountPattern = '[¥\\]?(\d{1,3}(?:[,.]\d{3})+|\d{4,9})'
 function Find-TotalAmount {
     param([string]$t)
@@ -896,6 +896,17 @@ function Get-VendorList {
         $script:VendorList = @()
     }
     return ,$script:VendorList
+}
+
+# リンクで届いた請求書の取引先名の候補：差出人名 ＋ 件名・本文に出てくる業者一覧の会社名
+function Get-LinkVendorKeys {
+    param([string]$Subject, [string]$Text, $Vendor, [string]$SenderNm)
+    $keys = @(Get-VendorKeywords $Vendor $SenderNm)
+    $t = ConvertTo-MatchText "$Subject $Text"
+    foreach ($v in (Get-VendorList)) {
+        if ($v.Core -and $v.Core.Length -ge 2 -and $t.Contains($v.Core)) { $keys += $v.Core }
+    }
+    return @($keys | Where-Object { $_ } | Select-Object -Unique)
 }
 
 # 差出人が業者一覧にあるか → 「あり（…）」「なし」。一覧を使わない設定なら空
@@ -1291,8 +1302,17 @@ try {
                             if ($copyMonth -gt $received.Month) { $cy = $received.Year - 1 } else { $cy = $received.Year }
                             $months = @((Get-Date -Year $cy -Month $copyMonth -Day 1).Date) + @($months | Where-Object { $_.Month -ne $copyMonth })
                         }
-                        $monthText = (@($months | ForEach-Object { $_.ToString('yyyy/MM') }) -join '・')
                         $monthSource = '推測（請求書の日付を読み取れず）'
+                        if ($mode -eq 'link') {
+                            # リンクの請求書：メール本文に請求日などがあれば、その月を最初に探す
+                            $md = Find-InvoiceDate "$subject`n$newBody" $received
+                            if ($md) {
+                                $mm = (Get-Date -Year $md.Year -Month $md.Month -Day 1).Date
+                                $months = @($mm) + @($months | Where-Object { $_ -ne $mm })
+                                $monthSource = 'メール本文の日付（＋推測）'
+                            }
+                        }
+                        $monthText = (@($months | ForEach-Object { $_.ToString('yyyy/MM') }) -join '・')
                     }
                     $monthFolders = @(foreach ($mo in $months) { Find-MonthFolders $mo })
                     if ($isSpecial) { $searchFolders = @(Find-SpecialFolders $monthFolders) } else { $searchFolders = $monthFolders }
@@ -1370,14 +1390,44 @@ try {
                         else { $storeJudge = '済' }
                     }
                     elseif ($mode -eq 'link') {
+                        # リンクで届いた請求書：ファイルがないので、メール本文の情報（金額・日付・取引先名）で格納場所のPDFを探す
+                        $linkKeys = @(Get-LinkVendorKeys $subject $newBody $vendor $senderNm)
+                        $mailFeat = Get-InvoiceFeatures "$subject`n$newBody" $received
+                        $mfo = ConvertFrom-Features $mailFeat
+                        $readMail = ''
+                        if ($mfo.Amount -gt 0 -or $mfo.Regs.Count -gt 0) { $readMail = Format-Features $mailFeat }
                         $lr = [pscustomobject]@{ Result = '未'; How = ''; Path = '' }
-                        if ($searchFolders.Count -gt 0) { $lr = Find-StoredByKeyword (Get-VendorKeywords $vendor $senderNm) $searchFolders }
+                        if ($readMail -and $Storage.ContentMatch.Enabled) {
+                            $cm = Find-ContentMatch $mailFeat (Get-ContentCandidates $months $linkKeys)
+                            if ($cm.Path) {
+                                $lr = [pscustomobject]@{ Result = '済(内容一致)'; How = 'メール本文の金額・日付などと一致するPDFあり'; Path = $cm.Path }
+                            } elseif ($cm.Near) {
+                                $nearName = ConvertTo-MatchText ([IO.Path]::GetFileName($cm.Near))
+                                $keyNorm = @($linkKeys | ForEach-Object { ConvertTo-MatchText $_ } | Where-Object { $_ })
+                                if ($cm.NearWhy -eq '金額が一致' -and $keyNorm.Count -gt 0 -and (Test-ContainsAny $nearName $keyNorm)) {
+                                    $lr = [pscustomobject]@{ Result = '済(内容一致)'; How = 'メール本文の金額と、ファイル名の取引先名が一致するPDFあり'; Path = $cm.Near }
+                                } else {
+                                    $lr = [pscustomobject]@{ Result = '要確認'; How = "似たファイルがあります（$($cm.NearWhy)）。中身を見比べてください"; Path = $cm.Near }
+                                }
+                            } elseif ($cm.NoOcr) {
+                                $readMail += '（文字認識が使えないため、格納場所のPDFとの照合はしていません）'
+                            }
+                        }
+                        if ($lr.Result -eq '未' -and $searchFolders.Count -gt 0) {
+                            $kr = Find-StoredByKeyword $linkKeys $searchFolders
+                            if ($kr.Result -like '済*') { $lr = $kr }
+                        }
+                        if ($readMail) { $lr.How = Join-Notes @($lr.How, "メール本文から読み取った内容：$readMail") }
+                        if ($lr.Result -eq '未') {
+                            if ($linkKeys.Count -gt 0) { $lr.How = Join-Notes @($lr.How, "取引先名（$($linkKeys -join '・')）でも探しました") }
+                            else { $lr.How = Join-Notes @($lr.How, '取引先名が分からないため名前では探せませんでした（業者一覧に載ると探せます）') }
+                        }
                         if ($lr.Path) { $storePaths += $lr.Path }
                         if ($judges -contains '済') { $storeJudge = '済' }
                         elseif ($judges -contains '済(内容一致)') { $storeJudge = '済(内容一致)' }
                         elseif ($lr.Result -like '済*') { $storeJudge = $lr.Result; $storeNote = Join-Notes @($storeNote, $lr.How) }
                         elseif ($judges -contains '要確認' -or $lr.Result -eq '要確認') { $storeJudge = '要確認'; $storeNote = Join-Notes @($storeNote, $lr.How) }
-                        else { $storeJudge = '未'; $storeNote = Join-Notes @($storeNote, 'リンク先からダウンロードして格納が必要') }
+                        else { $storeJudge = '未'; $storeNote = Join-Notes @($storeNote, 'リンク先からダウンロードして格納が必要', $lr.How) }
                     }
                     else {
                         if ($judges -contains '済') { $storeJudge = '済' }
