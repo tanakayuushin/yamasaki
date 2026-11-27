@@ -13,10 +13,13 @@
   使い方ガイド.html            … 利用者向けの説明（社内の運用に合わせて作成。Git管理外）
   1_はじめに_環境チェック.bat  … このPCで動くかの確認（読み取りのみ）
   2_請求書メールチェック.bat   … チェックの実行。終わると結果の画面がブラウザで開く
+  3_メールを開くリンクの準備.bat … 結果の画面の「Outlookで開く」を使えるようにする（最初に1回）
   結果\                        … 結果（HTML・CSV）。KeepDays 日より古いものは自動で削除
   system\
     Check-InvoiceMails.ps1     … 本体
     Test-Environment.ps1       … 環境チェック
+    Open-Mail.ps1              … 「Outlookで開く」からメールを表示する補助
+    Register-MailLink.ps1      … 「Outlookで開く」を使えるようにする登録（3_… の bat から実行）
     config.sample.json         … 設定の見本。コピーして config.json にし、社内の値を入れる
     config.json                … 実際の設定（Git管理外）
     inspect_cache.json         … 添付の確認結果の記録（ハッシュ値と結果のみ。Git管理外）
@@ -100,6 +103,12 @@
 - シート `Sheet`、見出し `NameHeader`（業者名）・`EmailHeader`（メールアドレス）の列を使う。見出しの行は自動で探す
 - 照合の順：メールアドレスが一致 → ドメインが一致（`SharedDomains` の共用メールサービスと、一覧で複数の業者が使っているドメインは除く）→ 差出人名に会社名 → 本文の先頭に会社名
 - 一覧のファイルは毎回読み直すので、Excel で更新すれば次の実行から反映される
+
+### 「Outlookで開く」リンク
+結果の画面の各メールに `invoicecheck-mail:<EntryID>?store=<StoreID>` のリンクを付ける。
+`3_メールを開くリンクの準備.bat`（`Register-MailLink.ps1`）で、HKEY_CURRENT_USER\Software\Classes\invoicecheck-mail に
+「このリンクは `Open-Mail.ps1` で開く」を登録する（管理者不要。`-Remove` で解除）。
+`Open-Mail.ps1` は、形が正しいリンク（16進の EntryID／StoreID のみ）だけを受け付け、`GetItemFromID(...).Display()` でメールを表示するだけ。
 
 ## 安全面
 - メール・フラグ・分類項目・ファイルは変更しない。添付は一時フォルダに取り出して照合し、終了時に削除

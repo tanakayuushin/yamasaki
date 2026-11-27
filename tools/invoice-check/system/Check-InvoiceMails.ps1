@@ -1096,7 +1096,7 @@ function Test-OutlookDisconnected {
 # ---------------------------------------------------------------------------
 $Columns = @('結果', 'やること', '受信日時', '請求月', '取引先', '業者一覧', '件名', '差出人', '差出人アドレス', '対応段階', '確認者', '不備', '特定案件',
              '種別', '検出根拠', '注意', 'コピー', 'コピー先', '格納', '格納ファイル', '探したフォルダ', '返信',
-             'コピー先フラグ', 'コピー元フラグ', '添付ファイル', 'リンク先', '備考', 'Outlookフォルダ')
+             'コピー先フラグ', 'コピー元フラグ', '添付ファイル', 'リンク先', '備考', 'Outlookフォルダ', 'EntryID', 'StoreID')
 function New-Row {
     $r = [ordered]@{}
     foreach ($c in $Columns) { $r[$c] = '' }
@@ -1186,12 +1186,14 @@ try {
             foreach ($mail in $items) {
                 $atts = @()
                 $mailFolder = ''
+                $mailStore = ''
                 try {
                     if ($mail.Class -ne 43) { continue }   # 43 = メール（会議通知などは除く）
                     # メールが入っているフォルダ（コピー先フォルダの中のコピーは対象外）
                     try {
                         $parent = $mail.Parent
                         $mailFolder = [string]$parent.FolderPath
+                        $mailStore = [string]$parent.StoreID
                         [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($parent)
                     } catch { }
                     if ($mailFolder -and $mailFolder.StartsWith($copyRootPath)) { continue }
@@ -1569,6 +1571,8 @@ try {
                     $row['リンク先']       = ((@($links | ForEach-Object { Get-UrlHost $_ } | Where-Object { $_ } | ForEach-Object { ConvertTo-Defanged $_ }) | Select-Object -Unique) -join ' ')
                     $row['備考']           = (Join-Notes (@($copyNote, $storeNote) + $notes))
                     $row['Outlookフォルダ'] = $mailFolder
+                    $row['EntryID'] = [string]$mail.EntryID
+                    $row['StoreID'] = $mailStore
                     $results.Add([pscustomobject]$row)
                 }
                 catch {
@@ -1583,6 +1587,7 @@ try {
                     $row['やること'] = 'このメールは直接確認してください'
                     $row['備考'] = [string]$_.Exception.Message
                     $row['Outlookフォルダ'] = $mailFolder
+                    try { $row['EntryID'] = [string]$mail.EntryID; $row['StoreID'] = $mailStore } catch { }
                     $results.Add([pscustomobject]$row)
                 }
                 finally {
@@ -1707,6 +1712,8 @@ main{max-width:1100px;margin:0 auto;padding:16px}
 .item h3{margin:6px 0 0;font-size:16px}.subject{margin:2px 0 6px;color:var(--sub);word-break:break-all}
 .todo{margin:6px 0;padding:6px 10px;border-radius:6px;background:rgba(127,127,127,.12);font-weight:600}
 .caution{color:var(--alert);font-weight:700;margin:6px 0}
+.open{display:inline-block;margin-left:8px;padding:0 10px;border:1px solid var(--line);border-radius:6px;font-size:13px;color:var(--ink);text-decoration:none;background:var(--bg);white-space:nowrap}
+.open:hover{border-color:var(--ink)}
 .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
 .chip{border:1px solid var(--line);border-radius:6px;padding:1px 8px;font-size:13px}.chip b{font-weight:400;color:var(--sub);margin-right:6px}
 .chip.ok{border-color:var(--ok);color:var(--ok)}.chip.bad{border-color:var(--miss);color:var(--miss);font-weight:700}
@@ -1754,7 +1761,13 @@ foreach ($r in $sorted) {
     if ($r.不備) { [void]$sb.Append('<span>不備</span>') }
     if ($r.種別) { [void]$sb.Append("<span>$(ConvertTo-HtmlText $r.種別)</span>") }
     if ($nl -eq '1') { [void]$sb.Append('<span style="color:var(--alert);font-weight:700">一覧にない業者</span>') }
-    [void]$sb.Append("</div><h3>$(ConvertTo-HtmlText $r.取引先)</h3><p class=""subject"">$(ConvertTo-HtmlText $r.件名)</p>")
+    $openLink = ''
+    if ([string]$r.EntryID -match '^[0-9A-Fa-f]{20,}$') {
+        $href = 'invoicecheck-mail:' + [string]$r.EntryID
+        if ([string]$r.StoreID -match '^[0-9A-Fa-f]{20,}$') { $href += '?store=' + [string]$r.StoreID }
+        $openLink = " <a class=""open"" href=""$(ConvertTo-HtmlText $href)"">Outlookで開く</a>"
+    }
+    [void]$sb.Append("</div><h3>$(ConvertTo-HtmlText $r.取引先)</h3><p class=""subject"">$(ConvertTo-HtmlText $r.件名)$openLink</p>")
     if ($r.やること) { [void]$sb.Append("<p class=""todo"">やること：$(ConvertTo-HtmlText $r.やること)</p>") }
     if ($r.注意) { [void]$sb.Append("<p class=""caution"">注意：$(ConvertTo-HtmlText $r.注意)</p>") }
     if ($g -ne '対象外' -and $g -ne 'エラー') {
@@ -1775,7 +1788,7 @@ foreach ($r in $sorted) {
 [void]$sb.Append('<p id="empty" hidden>表示するメールはありません。</p>')
 [void]$sb.Append('<section class="legend"><h2 style="font-size:16px;margin:0 0 6px">結果の意味とやること</h2><table>')
 foreach ($g in $Groups.Keys) { [void]$sb.Append("<tr><td class=""$($Groups[$g].Css)""><span class=""badge"">$(ConvertTo-HtmlText $g)</span></td><td>$(ConvertTo-HtmlText $Groups[$g].Desc)</td></tr>") }
-[void]$sb.Append('</table><p style="color:var(--sub);font-size:13px;margin:8px 0 0">各項目の色：緑＝できている／橙＝足りない／黄＝要確認／灰＝まだ不要。リンクのURLは安全のため載せていません（リンク先はドメインのみ）。</p></section>')
+[void]$sb.Append('</table><p style="color:var(--sub);font-size:13px;margin:8px 0 0">「Outlookで開く」を押すと、そのメールが Outlook で開きます（最初に「3_メールを開くリンクの準備.bat」を1回実行してください）。各項目の色：緑＝できている／橙＝足りない／黄＝要確認／灰＝まだ不要。リンクのURLは安全のため載せていません（リンク先はドメインのみ）。</p></section>')
 [void]$sb.Append(@'
 </main>
 <script>
