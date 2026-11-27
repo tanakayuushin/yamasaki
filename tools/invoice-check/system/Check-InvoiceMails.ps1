@@ -220,6 +220,24 @@ function Find-SpecialFolders {
     }
 }
 
+# 推測した月以外も探すための範囲：受信した年と前の年の、すべての月フォルダ（特定案件はその中の専用フォルダ）
+$script:WideCache = @{}
+function Get-WideFolders {
+    param([datetime]$Received, [bool]$Special)
+    $key = "$($Received.Year)|$Special"
+    if ($script:WideCache.ContainsKey($key)) { return $script:WideCache[$key] }
+    $list = @()
+    $root = [string]$Storage.RootPath
+    if (Test-Path -LiteralPath $root -PathType Container) {
+        $years = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Name -match ('^(' + $Received.Year + '|' + ($Received.Year - 1) + ')(?!\d)') })
+        $months = @(foreach ($y in $years) { Get-ChildItem -LiteralPath $y.FullName -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName } })
+        if ($Special) { $list = @(Find-SpecialFolders $months) } else { $list = $months }
+    }
+    $script:WideCache[$key] = $list
+    return $list
+}
+
 $script:FolderCache = @{}
 function Get-FolderIndex {
     param([string]$Folder)
@@ -241,7 +259,7 @@ function Get-FileSha256 {
 
 # 添付と中身が同じファイルがあるか → なければ同じ名前のファイルがあるか
 function Find-StoredFile {
-    param([string]$TempFile, [string]$FileName, [string[]]$Folders)
+    param([string]$TempFile, [string]$FileName, [string[]]$Folders, [switch]$HashOnly)
     $hash = Get-FileSha256 $TempFile
     $size = (Get-Item -LiteralPath $TempFile).Length
     foreach ($f in $Folders) {
@@ -254,6 +272,7 @@ function Find-StoredFile {
             if ($idx.Hashes[$file.FullName] -eq $hash) { return [pscustomobject]@{ Result = '済'; How = '中身が一致'; Path = $file.FullName } }
         }
     }
+    if ($HashOnly) { return [pscustomobject]@{ Result = '未'; How = ''; Path = '' } }
     $want = ConvertTo-MatchText $FileName
     foreach ($f in $Folders) {
         $hit = (Get-FolderIndex $f).Files | Where-Object { (ConvertTo-MatchText $_.Name) -ieq $want } | Select-Object -First 1
@@ -760,7 +779,7 @@ try {
                         }
                     }
                     $links = @()
-                    if ($atts.Count -eq 0) { $links = @(Get-InvoiceLinks $body $htmlBody) }
+                    $links = @(Get-InvoiceLinks $body $htmlBody)   # 添付があってもリンクも見る（請求書がリンクで届き、添付は別の書類のこともあるため）
                     if ($atts.Count -eq 0 -and $links.Count -eq 0 -and $warn.Count -eq 0) { continue }
 
                     # --- 基本情報 ---
@@ -819,51 +838,67 @@ try {
                     if ($isSpecial) { $searchFolders = @(Find-SpecialFolders $monthFolders) } else { $searchFolders = $monthFolders }
 
                     $storeJudge = '未'; $storeNote = ''; $storePaths = @(); $attDetail = @()
+                    $monthText = (@($months | ForEach-Object { $_.ToString('yyyy/MM') }) -join '・')
                     if ($searchFolders.Count -eq 0) {
-                        if ($isSpecial -and $monthFolders.Count -gt 0) { $storeNote = "月フォルダの中に $spLabel 用フォルダがない" } else { $storeNote = '請求年月のフォルダがない' }
-                    } elseif ($atts.Count -gt 0) {
-                        # 請求書のファイル = ファイル名や中身から請求書と分かった添付。分からなければ PDF（なければ全部）を候補にする
-                        $files = @($atts | Where-Object { $_.IsInvoice })
-                        $identified = ($files.Count -gt 0)
-                        if (-not $identified) {
-                            $files = @($atts | Where-Object { $_.Kind -eq 'PDF' })
-                            if ($files.Count -eq 0) { $files = $atts }
+                        if ($isSpecial -and $monthFolders.Count -gt 0) { $storeNote = "月フォルダの中に $spLabel 用フォルダがない" } else { $storeNote = "推測した月（$monthText）のフォルダがない" }
+                    }
+
+                    # 請求書がどう届いたか
+                    #   attach … ファイル名か中身で請求書と分かった添付がある → そのファイルがすべて格納されているか
+                    #   link   … 分からず、取得用のリンクがある → リンクの請求書（取引先名で推定）。添付のどれかが格納されていても済
+                    #   any    … 分からず、リンクもない → 添付（PDF、なければ全部）のどれか1つが格納されているか
+                    $invoiceAtts = @($atts | Where-Object { $_.IsInvoice })
+                    if ($invoiceAtts.Count -gt 0) { $mode = 'attach'; $files = $invoiceAtts }
+                    elseif ($links.Count -gt 0) { $mode = 'link'; $files = @($atts | Where-Object { $_.Kind -eq 'PDF' }) }
+                    else {
+                        $mode = 'any'
+                        $files = @($atts | Where-Object { $_.Kind -eq 'PDF' })
+                        if ($files.Count -eq 0) { $files = $atts }
+                    }
+
+                    $judges = @()
+                    foreach ($a in $files) {
+                        $tmp = Save-AttTemp $a
+                        $r = [pscustomobject]@{ Result = '未'; How = ''; Path = '' }
+                        if ($searchFolders.Count -gt 0) { $r = Find-StoredFile $tmp $a.Name $searchFolders }
+                        if ($r.Result -ne '済') {
+                            # 推測した月のフォルダになければ、受信した年と前の年のほかの月も探す（中身が同じものだけ）
+                            $rw = Find-StoredFile $tmp $a.Name (Get-WideFolders $received $isSpecial) -HashOnly
+                            if ($rw.Result -eq '済') { $r = [pscustomobject]@{ Result = '済'; How = "推測した月（$monthText）とは別の月のフォルダにありました"; Path = $rw.Path } }
                         }
-                        $judges = @()
-                        foreach ($a in $files) {
-                            $tmp = Save-AttTemp $a
-                            $r = Find-StoredFile $tmp $a.Name $searchFolders
-                            if ($r.Result -eq '未' -and $a.Kind -ne 'PDF') {
-                                # 画像・Excel などは PDF にして格納されることがある → 取引先名で推定
-                                $r2 = Find-StoredByKeyword (Get-VendorKeywords $vendor $senderNm) $searchFolders
-                                if ($r2.Result -like '済*') { $r = $r2 }
-                            }
-                            $judges += $r.Result
-                            if ($a.IsInvoice) { $mark = '（請求書）' } else { $mark = '' }
-                            $attDetail += ('{0}{1}：{2}' -f $a.Name, $mark, $r.Result)
-                            if ($r.Path) { $storePaths += $r.Path }
-                            if ($r.How) { $storeNote = Join-Notes @($storeNote, "$($a.Name)：$($r.How)") }
+                        if ($r.Result -eq '未' -and $a.Kind -ne 'PDF' -and $searchFolders.Count -gt 0) {
+                            # 画像・Excel などは PDF にして格納されることがある → 取引先名で推定
+                            $r2 = Find-StoredByKeyword (Get-VendorKeywords $vendor $senderNm) $searchFolders
+                            if ($r2.Result -like '済*') { $r = $r2 }
                         }
-                        if ($identified) {
-                            # 請求書と分かったファイルが、すべて格納されているか
-                            if ($judges -contains '未') { $storeJudge = '未' }
-                            elseif ($judges -contains '要確認') { $storeJudge = '要確認' }
-                            elseif ($judges -contains '済(推定)') { $storeJudge = '済(推定)' }
-                            else { $storeJudge = '済' }
-                        } else {
-                            # どれが請求書か分からない → どれか1つが格納されていれば済
-                            if ($judges -contains '済') { $storeJudge = '済' }
-                            elseif ($judges -contains '済(推定)') { $storeJudge = '済(推定)' }
-                            elseif ($judges -contains '要確認') { $storeJudge = '要確認' }
-                            else { $storeJudge = '未' }
-                            if ($files.Count -gt 1) { $storeNote = Join-Notes @($storeNote, 'どの添付が請求書か分からないため、どれか1つが格納されていれば「済」としています') }
-                        }
-                    } else {
-                        $r = Find-StoredByKeyword (Get-VendorKeywords $vendor $senderNm) $searchFolders
-                        $storeJudge = $r.Result
-                        if ($r.How) { $storeNote = $r.How }
+                        $judges += $r.Result
+                        if ($a.IsInvoice) { $mark = '（請求書）' } else { $mark = '' }
+                        $attDetail += ('{0}{1}：{2}' -f $a.Name, $mark, $r.Result)
                         if ($r.Path) { $storePaths += $r.Path }
-                        if ($r.Result -eq '未') { $storeNote = 'リンク先からダウンロードして格納が必要' }
+                        if ($r.How) { $storeNote = Join-Notes @($storeNote, "$($a.Name)：$($r.How)") }
+                    }
+
+                    if ($mode -eq 'attach') {
+                        if ($judges -contains '未') { $storeJudge = '未' }
+                        elseif ($judges -contains '要確認') { $storeJudge = '要確認' }
+                        elseif ($judges -contains '済(推定)') { $storeJudge = '済(推定)' }
+                        else { $storeJudge = '済' }
+                    }
+                    elseif ($mode -eq 'link') {
+                        $lr = [pscustomobject]@{ Result = '未'; How = ''; Path = '' }
+                        if ($searchFolders.Count -gt 0) { $lr = Find-StoredByKeyword (Get-VendorKeywords $vendor $senderNm) $searchFolders }
+                        if ($lr.Path) { $storePaths += $lr.Path }
+                        if ($judges -contains '済') { $storeJudge = '済' }
+                        elseif ($lr.Result -like '済*') { $storeJudge = $lr.Result; $storeNote = Join-Notes @($storeNote, $lr.How) }
+                        elseif ($judges -contains '要確認' -or $lr.Result -eq '要確認') { $storeJudge = '要確認'; $storeNote = Join-Notes @($storeNote, $lr.How) }
+                        else { $storeJudge = '未'; $storeNote = Join-Notes @($storeNote, 'リンク先からダウンロードして格納が必要') }
+                    }
+                    else {
+                        if ($judges -contains '済') { $storeJudge = '済' }
+                        elseif ($judges -contains '済(推定)') { $storeJudge = '済(推定)' }
+                        elseif ($judges -contains '要確認') { $storeJudge = '要確認' }
+                        else { $storeJudge = '未' }
+                        if ($files.Count -gt 1) { $storeNote = Join-Notes @($storeNote, 'どの添付が請求書か分からないため、どれか1つが格納されていれば「済」としています') }
                     }
                     if ($storeJudge -eq '未' -and $hasDefect) { $storeJudge = '不備(再発行待ち)' }
 
@@ -914,9 +949,9 @@ try {
                     $row['確認者']         = ($confirmers -join ',')
                     if ($hasDefect) { $row['不備'] = '○' }
                     if ($isSpecial) { $row['特定案件'] = '○' }
-                    if ($atts.Count -gt 0) { $row['種別'] = ((@($atts | ForEach-Object { $_.Kind }) | Select-Object -Unique) -join '+') }
-                    elseif ($links.Count -gt 0) { $row['種別'] = 'リンク' }
-                    else { $row['種別'] = '危険な添付のみ' }
+                    $kinds = @(@($atts | ForEach-Object { $_.Kind }) | Select-Object -Unique)
+                    if ($links.Count -gt 0) { $kinds += 'リンク' }
+                    if ($kinds.Count -gt 0) { $row['種別'] = ($kinds -join '+') } else { $row['種別'] = '危険な添付のみ' }
                     $row['検出根拠']       = ($reasons -join ' / ')
                     $row['注意']           = ($warn -join ' / ')
                     $row['コピー']         = $copyJudge
@@ -1023,6 +1058,14 @@ $counts = @{}
 foreach ($g in $Groups.Keys) { $counts[$g] = 0 }
 foreach ($r in $sorted) { if ($counts.ContainsKey([string]$r.結果)) { $counts[[string]$r.結果]++ } }
 $todoCount = $counts['要注意'] + $counts['漏れあり'] + $counts['エラー'] + $counts['対応待ち']
+# 保管が未のもの：確認の段階に関係なく、請求書のファイルが格納されていない（済・不備以外）もの
+function Test-StoreMissing {
+    param($Row)
+    if ([string]$Row.結果 -eq '対象外' -or [string]$Row.結果 -eq 'エラー') { return $false }
+    $v = [string]$Row.格納
+    return -not ($v -like '済*' -or $v -like '不備*')
+}
+$storeMissingCount = @($sorted | Where-Object { Test-StoreMissing $_ }).Count
 
 $sb = New-Object System.Text.StringBuilder
 [void]$sb.Append(@'
@@ -1077,6 +1120,7 @@ if ($counts['要注意'] -gt 0) { [void]$sb.Append("<div class=""notice""><b>要
 
 [void]$sb.Append('<div class="cards">')
 [void]$sb.Append("<button class=""card g-wait"" data-filter=""todo""><span class=""n"">$todoCount</span><span class=""l"">対応が必要なもの</span><span class=""d"">OK・対象外以外のすべて</span></button>")
+[void]$sb.Append("<button class=""card g-miss"" data-filter=""store""><span class=""n"">$storeMissingCount</span><span class=""l"">保管が未のもの</span><span class=""d"">確認の段階に関係なく、請求書のファイルが既定の場所に見つからない</span></button>")
 foreach ($g in $Groups.Keys) {
     [void]$sb.Append("<button class=""card $($Groups[$g].Css)"" data-filter=""$(ConvertTo-HtmlText $g)""><span class=""n"">$($counts[$g])</span><span class=""l"">$(ConvertTo-HtmlText $g)</span><span class=""d"">$(ConvertTo-HtmlText $Groups[$g].Desc)</span></button>")
 }
@@ -1087,7 +1131,8 @@ foreach ($r in $sorted) {
     $g = [string]$r.結果
     $css = if ($Groups.Contains($g)) { $Groups[$g].Css } else { 'g-skip' }
     if ($r.確認者) { $stageText = "$($r.対応段階)（$($r.確認者)）" } else { $stageText = $r.対応段階 }
-    [void]$sb.Append("<article class=""item $css"" data-group=""$(ConvertTo-HtmlText $g)"">")
+    if (Test-StoreMissing $r) { $sm = '1' } else { $sm = '0' }
+    [void]$sb.Append("<article class=""item $css"" data-group=""$(ConvertTo-HtmlText $g)"" data-store=""$sm"">")
     [void]$sb.Append("<div class=""top""><span class=""badge"">$(ConvertTo-HtmlText $g)</span><span>$(ConvertTo-HtmlText $r.受信日時)</span><span>$(ConvertTo-HtmlText $stageText)</span>")
     if ($r.特定案件) { [void]$sb.Append("<span>$(ConvertTo-HtmlText $spLabel)</span>") }
     if ($r.不備) { [void]$sb.Append('<span>不備</span>') }
@@ -1126,7 +1171,7 @@ foreach ($g in $Groups.Keys) { [void]$sb.Append("<tr><td class=""$($Groups[$g].C
     var t=q.value.trim().toLowerCase(), n=0;
     items.forEach(function(it){
       var g=it.getAttribute('data-group');
-      var okF = cur==='all' || (cur==='todo' ? todo.indexOf(g)>=0 : g===cur);
+      var okF = cur==='all' || (cur==='todo' ? todo.indexOf(g)>=0 : (cur==='store' ? it.getAttribute('data-store')==='1' : g===cur));
       var okT = !t || it.textContent.toLowerCase().indexOf(t)>=0;
       it.hidden = !(okF && okT); if(!it.hidden) n++;
     });
@@ -1154,6 +1199,7 @@ foreach ($g in $Groups.Keys) {
     if ($g -eq '要注意') { $color = 'Red' } elseif ($g -eq '漏れあり') { $color = 'Yellow' } elseif ($g -eq 'エラー') { $color = 'Magenta' } elseif ($g -eq 'OK') { $color = 'Green' }
     Write-Host ('  {0} : {1} 件' -f $g, $counts[$g]) -ForegroundColor $color
 }
+Write-Host ('  （保管が未のもの : {0} 件）' -f $storeMissingCount) -ForegroundColor $(if ($storeMissingCount) { 'Yellow' } else { 'Gray' })
 if ($fatal) {
     Write-Host ''
     Write-Host "※ $fatal" -ForegroundColor Red
