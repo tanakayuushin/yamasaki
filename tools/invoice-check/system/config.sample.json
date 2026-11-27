@@ -1,0 +1,165 @@
+{
+  "Outlook": {
+    "Mailbox": "",
+    "SearchFolderName": "",
+    "Folders": [
+      "受信トレイ"
+    ],
+    "IncludeSubfolders": false,
+    "DaysBack": 7,
+    "CopyRootFolder": "受信トレイ\\請求書"
+  },
+  "Rules": {
+    "Staff": [],
+    "DefectCategory": "不備",
+    "IgnoreCategories": [],
+    "ExcludeCategories": [
+      "対象外"
+    ],
+    "NormalCopyFolderPattern": "(\\d{1,2})月分",
+    "SpecialProject": {
+      "Label": "特定案件",
+      "Keywords": [],
+      "CopyFolderPattern": "",
+      "StorageSubfolderPattern": ""
+    },
+    "AutoMailSenderPatterns": [
+      "no-?reply",
+      "do-?not-?reply",
+      "noreply",
+      "system",
+      "notification",
+      "notice",
+      "auto"
+    ]
+  },
+  "Detection": {
+    "Keywords": [
+      "請求書",
+      "ご請求",
+      "御請求",
+      "請求のご案内",
+      "請求金額",
+      "Invoice",
+      "INVOICE"
+    ],
+    "ExcludeSubjectKeywords": [
+      "見積書",
+      "注文書",
+      "発注書"
+    ],
+    "MinImageBytes": 30000,
+    "LinkPatterns": [
+      "bill-one",
+      "invoice",
+      "seikyu",
+      "misoca",
+      "freee",
+      "moneyforward",
+      "bakuraku",
+      "rakuraku",
+      "download"
+    ],
+    "LinkContextKeywords": [
+      "請求書",
+      "ダウンロード",
+      "ログイン",
+      "確認はこちら",
+      "こちらから"
+    ],
+    "LinkContextChars": 80,
+    "IgnoreUrlPatterns": [
+      "unsubscribe",
+      "privacy",
+      "facebook\\.com",
+      "twitter\\.com",
+      "x\\.com",
+      "instagram\\.com",
+      "linkedin\\.com",
+      "maps\\.google"
+    ]
+  },
+  "Inspection": {
+    "Enabled": true,
+    "OcrLanguage": "ja",
+    "MaxPdfPages": 2,
+    "MaxAttachmentsPerMail": 3,
+    "MaxFileMB": 15,
+    "UseRegistrationNumber": true
+  },
+  "Caution": {
+    "BankChangeKeywords": [
+      "振込先変更",
+      "振込先の変更",
+      "振込先を変更",
+      "振込先が変更",
+      "振込先が変わ",
+      "お振込先の変更",
+      "振込口座の変更",
+      "振込口座を変更",
+      "口座変更",
+      "口座の変更",
+      "口座を変更",
+      "口座が変更",
+      "口座が変わ",
+      "新しい口座",
+      "新口座",
+      "旧口座",
+      "変更後の口座",
+      "入金口座の変更",
+      "bank account change",
+      "new bank account",
+      "change of bank"
+    ],
+    "DangerExtensions": [
+      ".exe",
+      ".scr",
+      ".com",
+      ".pif",
+      ".bat",
+      ".cmd",
+      ".js",
+      ".jse",
+      ".vbs",
+      ".vbe",
+      ".wsf",
+      ".hta",
+      ".ps1",
+      ".lnk",
+      ".iso",
+      ".img",
+      ".vhd",
+      ".jar",
+      ".msi",
+      ".html",
+      ".htm",
+      ".xlsm",
+      ".docm",
+      ".pptm"
+    ]
+  },
+  "Storage": {
+    "RootPath": "\\\\fileserver\\share\\請求書PDF",
+    "SearchMonthOffsets": [
+      0,
+      -1
+    ],
+    "Recurse": true
+  },
+  "Vendors": [
+    {
+      "Name": "株式会社サンプル商事",
+      "SenderPatterns": [
+        "@sample-shoji\\.co\\.jp"
+      ],
+      "FileKeywords": [
+        "サンプル商事"
+      ]
+    }
+  ],
+  "Report": {
+    "OutputFolder": "..\\結果",
+    "OpenReport": true,
+    "KeepDays": 30
+  }
+}

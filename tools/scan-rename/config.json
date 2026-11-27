@@ -1,0 +1,53 @@
+{
+  "Input": {
+    "Folder": "C:\\Scan\\受信",
+    "Extensions": [".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"],
+    "SkipIfNameMatches": "^\\d{6}_"
+  },
+
+  "Ocr": {
+    "Language": "ja",
+    "MaxPages": 1,
+    "PdfRenderScale": 3.0,
+    "TryRotation": true
+  },
+
+  "OwnCompanyNames": ["株式会社〇〇〇〇"],
+
+  "DocTypes": [
+    { "Name": "注文請書", "Keywords": ["注文請書", "御注文請書", "注文請け書", "注文受書"], "Party": "issuer" },
+    { "Name": "請求書",   "Keywords": ["御請求書", "請求書", "ご請求書", "INVOICE"],       "Party": "issuer" },
+    { "Name": "納品書",   "Keywords": ["納品書"],                                         "Party": "issuer" },
+    { "Name": "見積書",   "Keywords": ["御見積書", "見積書"],                               "Party": "issuer" },
+    { "Name": "注文書",   "Keywords": ["注文書", "発注書"],                                 "Party": "issuer" }
+  ],
+  "TargetDocTypes": ["請求書", "注文請書"],
+
+  "Vendors": [
+    { "Name": "株式会社サンプル商事", "Aliases": ["サンプル商事", "(株)サンプル商事"] }
+  ],
+
+  "Date": {
+    "Priority": ["月分", "ラベル", "最初の日付"],
+    "Labels": ["請求日", "発行日", "請求書発行日", "作成日", "注文請日", "請書日", "受注日", "日付"],
+    "ExcludeLabels": ["支払期限", "お支払", "支払日", "振込期限", "振込期日", "期日", "納期", "納入期限", "有効期限", "締日"],
+    "MonthOffset": 0
+  },
+
+  "Naming": {
+    "Template": "{yyyy}{MM}_{company}_{doctype}",
+    "StripCorporateForm": false
+  },
+
+  "Output": {
+    "Folder": "",
+    "SubfolderPattern": "",
+    "ReviewFolder": "",
+    "RenameEstimated": true
+  },
+
+  "Log": {
+    "Folder": "",
+    "SaveOcrText": false
+  }
+}
