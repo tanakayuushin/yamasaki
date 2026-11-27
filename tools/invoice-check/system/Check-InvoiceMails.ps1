@@ -745,8 +745,10 @@ try {
 
     foreach ($src in $sources) {
             Write-Host ('メールを確認中: ' + $src.Label)
+            # 直近の日数に絞ってから読む。絞れなかった場合は新しい順に並べ、古いメールに来たら止める
             try { $items = $src.Folder.Items.Restrict($filter) } catch { $items = $src.Folder.Items }
-            try { $items.Sort('[ReceivedTime]', $true) } catch { }
+            $sortedNewFirst = $false
+            try { $items.Sort('[ReceivedTime]', $true); $sortedNewFirst = $true } catch { }
             $total = [Math]::Max(1, [int]$items.Count)
 
             foreach ($mail in $items) {
@@ -761,7 +763,7 @@ try {
                         [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($parent)
                     } catch { }
                     if ($mailFolder -and $mailFolder.StartsWith($copyRootPath)) { continue }
-                    if ([datetime]$mail.ReceivedTime -lt $since) { continue }
+                    if ([datetime]$mail.ReceivedTime -lt $since) { if ($sortedNewFirst) { break } else { continue } }
                     $mailCount++
                     if (($mailCount % 25) -eq 0) {
                         Write-Progress -Activity 'メールを確認中' -Status "$mailCount 件目" -PercentComplete ([Math]::Min(100, 100 * $mailCount / $total))

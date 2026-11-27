@@ -138,15 +138,23 @@ if ($ns -and $Config) {
         if ($sf) {
             $since = (Get-Date).Date.AddDays(-[int]$Config.Outlook.DaysBack)
             $names = @{}; $n = 0
-            foreach ($it in $sf.Items) {
+            # 直近の日数に絞ってから数える（全部を1通ずつ読むと、とても時間がかかるため）
+            try { $sfItems = $sf.Items.Restrict("[ReceivedTime] >= '" + $since.ToString('g') + "'") } catch { $sfItems = $sf.Items }
+            $sortedNewFirst = $false
+            try { $sfItems.Sort('[ReceivedTime]', $true); $sortedNewFirst = $true } catch { }
+            foreach ($it in $sfItems) {
+                $stop = $false
                 try {
-                    if ($it.Class -ne 43) { continue }
-                    if ([datetime]$it.ReceivedTime -lt $since) { continue }
-                    $n++
-                    $fn = [string]$it.Parent.Name
-                    if ($names.ContainsKey($fn)) { $names[$fn]++ } else { $names[$fn] = 1 }
+                    if ($it.Class -eq 43) {
+                        if ([datetime]$it.ReceivedTime -lt $since) { $stop = $sortedNewFirst }
+                        else {
+                            $n++
+                            $fn = [string]$it.Parent.Name
+                            if ($names.ContainsKey($fn)) { $names[$fn]++ } else { $names[$fn] = 1 }
+                        }
+                    }
                 } catch { }
-                if ($n -ge 2000) { break }
+                if ($stop -or $n -ge 2000) { break }
             }
             Out-Result 'OK' "検索フォルダー「$sfName」" "直近 $($Config.Outlook.DaysBack) 日のメール $n 件"
             Out-Result 'INFO' '  入っているフォルダ（件数）' ((@($names.Keys | Sort-Object | ForEach-Object { "$_($($names[$_]))" })) -join ' / ')
