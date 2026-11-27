@@ -187,6 +187,36 @@
       ]
     }
   ],
+  "VendorList": {
+    "Path": "",
+    "Sheet": "一覧",
+    "NameHeader": "業者",
+    "EmailHeader": "メールアドレス",
+    "SharedDomains": [
+      "gmail.com",
+      "googlemail.com",
+      "yahoo.co.jp",
+      "yahoo.com",
+      "outlook.jp",
+      "outlook.com",
+      "hotmail.com",
+      "hotmail.co.jp",
+      "live.jp",
+      "icloud.com",
+      "me.com",
+      "nifty.com",
+      "biglobe.ne.jp",
+      "so-net.ne.jp",
+      "ocn.ne.jp",
+      "plala.or.jp",
+      "dion.ne.jp",
+      "docomo.ne.jp",
+      "ezweb.ne.jp",
+      "au.com",
+      "softbank.ne.jp",
+      "i.softbank.jp"
+    ]
+  },
   "Report": {
     "OutputFolder": "..\\結果",
     "OpenReport": true,

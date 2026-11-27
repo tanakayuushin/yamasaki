@@ -201,6 +201,14 @@ if ($Config) {
 }
 
 # ---------------------------------------------------------------------------
+Out-Section '業者一覧'
+if ($Config -and $Config.VendorList -and [string]$Config.VendorList.Path) {
+    $vp = [string]$Config.VendorList.Path
+    if (-not [IO.Path]::IsPathRooted($vp)) { $vp = [IO.Path]::GetFullPath((Join-Path $ScriptDir $vp)) }
+    if (Test-Path -LiteralPath $vp) { Out-Result 'OK' '業者一覧のファイル' $vp }
+    else { Out-Result 'WARN' '業者一覧のファイル' "見つかりません（$vp）。config.json の VendorList.Path を直してください（なくてもほかのチェックは動きます）" }
+} else { Out-Result 'INFO' '業者一覧' '設定なし（「一覧にない業者」のチェックは行いません）' }
+
 Out-Section '添付の中身の確認'
 if ($PSVersionTable.PSEdition -eq 'Core') {
     Out-Result 'WARN' '日本語の文字認識（OCR）' 'PowerShell 7 では使えません（bat から起動すれば使えます）'

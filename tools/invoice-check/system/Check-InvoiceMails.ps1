@@ -700,6 +700,173 @@ function Get-AttachmentFinding {
 }
 
 # ---------------------------------------------------------------------------
+# 業者一覧（Excel）との照合
+#   差出人が一覧の業者か：メールアドレスが一致 → ドメインが一致（共用のメールサービスは除く）→ 差出人名・本文の会社名
+# ---------------------------------------------------------------------------
+function Get-AddrDomain {
+    param([string]$Addr)
+    if ($Addr -match '@([^@>\s]+)\s*>?\s*$') { return $Matches[1].ToLower().Trim().TrimEnd('.') }
+    return ''
+}
+# 「mail.example.co.jp」→「example.co.jp」
+function Get-BaseDomain {
+    param([string]$HostName)
+    $p = @($HostName.ToLower().TrimEnd('.') -split '\.' | Where-Object { $_ })
+    if ($p.Count -ge 3 -and $p[-1] -eq 'jp' -and @('co', 'ne', 'or', 'ac', 'go', 'ed', 'gr', 'lg', 'ad') -contains $p[-2]) { return ($p[-3..-1] -join '.') }
+    if ($p.Count -ge 2) { return ($p[-2..-1] -join '.') }
+    return $HostName.ToLower()
+}
+
+# ZIP（xlsx）の中の XML を読む（XmlDocument がばらばらにならないよう , を付けて返す）
+function Get-ZipXml {
+    param($Zip, [string]$Name)
+    $e = $Zip.GetEntry($Name)
+    if (-not $e) { return $null }
+    $reader = New-Object System.IO.StreamReader($e.Open(), [Text.Encoding]::UTF8)
+    try {
+        $x = New-Object System.Xml.XmlDocument
+        $x.LoadXml($reader.ReadToEnd())
+    } finally { $reader.Dispose() }
+    return ,$x
+}
+
+# Excel（xlsx）の1シートを、行ごとの「列記号 → 文字」の一覧として読む（Excel は不要）
+function Read-XlsxRows {
+    param([string]$Path, [string]$SheetName)
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    $nsMain = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+    $nsRel  = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+    # Excel で開いたままでも読めるよう、一時フォルダにコピーしてから読む
+    $tmp = Join-Path $TempDir ([Guid]::NewGuid().ToString('N') + '.xlsx')
+    Copy-Item -LiteralPath $Path -Destination $tmp
+    $zip = [IO.Compression.ZipFile]::OpenRead($tmp)
+    try {
+        $wb = Get-ZipXml $zip 'xl/workbook.xml'
+        $nm = New-Object System.Xml.XmlNamespaceManager($wb.NameTable)
+        $nm.AddNamespace('x', $nsMain)
+        $sheets = @($wb.SelectNodes('//x:sheets/x:sheet', $nm))
+        $sheet = $null
+        foreach ($sh in $sheets) { if ($sh.GetAttribute('name') -eq $SheetName) { $sheet = $sh } }
+        if (-not $sheet) { $sheet = $sheets[0] }
+        $rid = $sheet.GetAttribute('id', $nsRel)
+
+        $rels = Get-ZipXml $zip 'xl/_rels/workbook.xml.rels'
+        $target = ''
+        foreach ($rel in $rels.DocumentElement.ChildNodes) {
+            if ($rel.NodeType -eq 'Element' -and $rel.GetAttribute('Id') -eq $rid) { $target = $rel.GetAttribute('Target') }
+        }
+        if ($target.StartsWith('/')) { $target = $target.TrimStart('/') } else { $target = 'xl/' + $target }
+
+        # 共有文字列（ふりがなは読まない）
+        $strings = New-Object System.Collections.Generic.List[string]
+        $sst = Get-ZipXml $zip 'xl/sharedStrings.xml'
+        if ($sst) {
+            $nm2 = New-Object System.Xml.XmlNamespaceManager($sst.NameTable)
+            $nm2.AddNamespace('x', $nsMain)
+            foreach ($si in $sst.SelectNodes('//x:si', $nm2)) {
+                $strings.Add(((@($si.SelectNodes('./x:t | ./x:r/x:t', $nm2) | ForEach-Object { $_.InnerText })) -join ''))
+            }
+        }
+
+        $sx = Get-ZipXml $zip $target
+        $nm3 = New-Object System.Xml.XmlNamespaceManager($sx.NameTable)
+        $nm3.AddNamespace('x', $nsMain)
+        $rows = New-Object System.Collections.Generic.List[object]
+        foreach ($row in $sx.SelectNodes('//x:sheetData/x:row', $nm3)) {
+            $cells = @{}
+            foreach ($c in $row.SelectNodes('./x:c', $nm3)) {
+                $col = ($c.GetAttribute('r') -replace '\d', '')
+                $t = $c.GetAttribute('t')
+                $v = $c.SelectSingleNode('./x:v', $nm3)
+                $val = ''
+                if ($t -eq 's' -and $v) { $idx = [int]$v.InnerText; if ($idx -lt $strings.Count) { $val = $strings[$idx] } }
+                elseif ($t -eq 'inlineStr') { $val = ((@($c.SelectNodes('./x:is/x:t | ./x:is/x:r/x:t', $nm3) | ForEach-Object { $_.InnerText })) -join '') }
+                elseif ($v) { $val = $v.InnerText }
+                $cells[$col] = [string]$val
+            }
+            $rows.Add($cells)
+        }
+        return ,$rows.ToArray()
+    } finally {
+        $zip.Dispose()
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+}
+
+$script:VendorList = $null
+$script:VendorDomainNames = @{}
+$script:VendorListNote = ''
+function Get-VendorList {
+    if ($null -ne $script:VendorList) { return ,$script:VendorList }
+    $script:VendorList = @()
+    $vl = $Config.VendorList
+    if (-not $vl -or -not [string]$vl.Path) { return ,$script:VendorList }
+    $path = [string]$vl.Path
+    if (-not [IO.Path]::IsPathRooted($path)) { $path = [IO.Path]::GetFullPath((Join-Path $ScriptDir $path)) }
+    if (-not (Test-Path -LiteralPath $path)) { $script:VendorListNote = "業者一覧のファイルが見つかりません（$path）"; return ,$script:VendorList }
+    try {
+        $rows = Read-XlsxRows $path ([string]$vl.Sheet)
+        # 見出しの行（「業者」と書かれた行）を探す
+        $start = -1; $nameCol = ''; $mailCol = ''
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            $nc = ''; $mc = ''
+            foreach ($k in @($rows[$i].Keys)) {
+                $v = ([string]$rows[$i][$k]).Trim()
+                if ($v -eq [string]$vl.NameHeader) { $nc = $k }
+                if ($v -eq [string]$vl.EmailHeader) { $mc = $k }
+            }
+            if ($nc) { $start = $i + 1; $nameCol = $nc; $mailCol = $mc; break }
+        }
+        if ($start -lt 0) { $script:VendorListNote = "業者一覧に見出し「$($vl.NameHeader)」が見つかりません"; return ,$script:VendorList }
+        $list = New-Object System.Collections.Generic.List[object]
+        for ($i = $start; $i -lt $rows.Count; $i++) {
+            $r = $rows[$i]
+            $name = ''
+            if ($r.ContainsKey($nameCol)) { $name = ([string]$r[$nameCol]).Trim() }
+            $mails = @()
+            if ($mailCol -and $r.ContainsKey($mailCol)) {
+                $mails = @(([string]$r[$mailCol]) -split '[\s;,、／/]+' | Where-Object { $_ -match '@' } | ForEach-Object { $_.Trim().ToLower() })
+            }
+            if (-not $name -and $mails.Count -eq 0) { continue }
+            $doms = @($mails | ForEach-Object { Get-BaseDomain (Get-AddrDomain $_) } | Where-Object { $_ } | Select-Object -Unique)
+            $list.Add([pscustomobject]@{ Name = $name; Core = (ConvertTo-MatchText (Get-CompanyKeyword $name)); Mails = $mails; Domains = $doms })
+            foreach ($d in $doms) {
+                if (-not $script:VendorDomainNames.ContainsKey($d)) { $script:VendorDomainNames[$d] = @{} }
+                $script:VendorDomainNames[$d][(ConvertTo-MatchText $name)] = $name
+            }
+        }
+        $script:VendorList = $list.ToArray()
+    } catch {
+        $script:VendorListNote = "業者一覧を読み込めませんでした（$($_.Exception.Message)）"
+        $script:VendorList = @()
+    }
+    return ,$script:VendorList
+}
+
+# 差出人が業者一覧にあるか → 「あり（…）」「なし」。一覧を使わない設定なら空
+function Find-ListedVendor {
+    param([string]$SenderAdr, [string]$SenderNm, [string]$Body)
+    $list = Get-VendorList
+    if ($list.Count -eq 0) { return '' }
+    $adr = ([string]$SenderAdr).ToLower().Trim()
+    foreach ($v in $list) { if ($v.Mails -contains $adr) { return "あり（メールアドレス一致：$($v.Name)）" } }
+    $d = Get-AddrDomain $adr
+    if ($d) {
+        $bd = Get-BaseDomain $d
+        $shared = @($Config.VendorList.SharedDomains) -contains $bd
+        if (-not $shared -and $script:VendorDomainNames.ContainsKey($bd) -and $script:VendorDomainNames[$bd].Count -eq 1) {
+            return "あり（ドメイン一致：$(@($script:VendorDomainNames[$bd].Values)[0])）"
+        }
+    }
+    $nm = ConvertTo-MatchText $SenderNm
+    foreach ($v in $list) { if ($v.Core -and $v.Core.Length -ge 2 -and $nm.Contains($v.Core)) { return "あり（差出人名が一致：$($v.Name)）" } }
+    $b = [string]$Body
+    $head = ConvertTo-MatchText ($b.Substring(0, [Math]::Min(1500, $b.Length)))
+    foreach ($v in $list) { if ($v.Core -and $v.Core.Length -ge 3 -and $head.Contains($v.Core)) { return "あり（本文に会社名：$($v.Name)）" } }
+    return 'なし'
+}
+
+# ---------------------------------------------------------------------------
 # Outlook
 # ---------------------------------------------------------------------------
 function Get-MapiProp {
@@ -810,7 +977,7 @@ function Test-OutlookDisconnected {
 # ---------------------------------------------------------------------------
 # 一覧の列
 # ---------------------------------------------------------------------------
-$Columns = @('結果', 'やること', '受信日時', '請求月', '取引先', '件名', '差出人', '差出人アドレス', '対応段階', '確認者', '不備', '特定案件',
+$Columns = @('結果', 'やること', '受信日時', '請求月', '取引先', '業者一覧', '件名', '差出人', '差出人アドレス', '対応段階', '確認者', '不備', '特定案件',
              '種別', '検出根拠', '注意', 'コピー', 'コピー先', '格納', '格納ファイル', '探したフォルダ', '返信',
              'コピー先フラグ', 'コピー元フラグ', '添付ファイル', 'リンク先', '備考', 'Outlookフォルダ')
 function New-Row {
@@ -987,6 +1154,7 @@ try {
                     $spKeys    = @($Rules.SpecialProject.Keywords | Where-Object { $_ })
                     $isSpecial = ($spKeys.Count -gt 0) -and ((Test-ContainsAny "$subject $attNames $senderNm" $spKeys) -or (Test-ContainsAny $body $spKeys))
                     $isAuto    = Test-MatchAny $senderAdr $Rules.AutoMailSenderPatterns
+                    $listed    = Find-ListedVendor $senderAdr $senderNm $body
                     $bankWord  = Find-FirstWord (ConvertTo-MatchText "$subject $body") @($Caution.BankChangeKeywords | ForEach-Object { ConvertTo-MatchText $_ })
                     if ($bankWord) { $warn += "振込先・口座の変更に関する記載（「$bankWord」）" }
 
@@ -1182,6 +1350,7 @@ try {
                     $row['受信日時']       = $received.ToString('yyyy/MM/dd HH:mm')
                     $row['請求月']         = "$monthText（$monthSource）"
                     if ($vendor) { $row['取引先'] = [string]$vendor.Name } else { $row['取引先'] = $senderNm }
+                    $row['業者一覧']       = $listed
                     $row['件名']           = $subject
                     $row['差出人']         = $senderNm
                     $row['差出人アドレス'] = $senderAdr
@@ -1306,6 +1475,13 @@ function Test-StoreMissing {
     return -not ($v -like '済*' -or $v -like '不備*')
 }
 $storeMissingCount = @($sorted | Where-Object { Test-StoreMissing $_ }).Count
+# 業者一覧にない業者から届いた請求書メール（対象外・エラーは除く）
+function Test-NotListed {
+    param($Row)
+    if ([string]$Row.結果 -eq '対象外' -or [string]$Row.結果 -eq 'エラー') { return $false }
+    return ([string]$Row.業者一覧 -eq 'なし')
+}
+$notListedCount = @($sorted | Where-Object { Test-NotListed $_ }).Count
 
 $sb = New-Object System.Text.StringBuilder
 [void]$sb.Append(@'
@@ -1354,12 +1530,16 @@ dl{display:grid;grid-template-columns:130px 1fr;gap:4px 12px;margin:8px 0 0;font
 $runAt  = (Get-Date).ToString('yyyy/MM/dd HH:mm')
 $period = "$scopeText の直近 $DaysBack 日（$($since.ToString('yyyy/MM/dd')) ～）のメール"
 [void]$sb.Append("<header><h1>請求書メールチェック結果</h1><div class=""meta"">実行：$(ConvertTo-HtmlText $runAt)　／　対象：$(ConvertTo-HtmlText $period)　／　確認したメール：$mailCount 件　／　請求書メール：$($sorted.Count) 件　／　<a href=""../使い方ガイド.html"">使い方ガイド</a></div></header><main>")
+if ($script:VendorListNote) { [void]$sb.Append("<div class=""notice"">$(ConvertTo-HtmlText $script:VendorListNote)</div>") }
 if ($fatal) { [void]$sb.Append("<div class=""notice""><b>途中で止まりました。</b>$(ConvertTo-HtmlText $fatal) この結果は、止まるまでに確認できた $mailCount 件分です。Outlook を開いたまま、もう一度実行してください。</div>") }
 if ($script:OcrSkipped -gt 0) { [void]$sb.Append("<div class=""notice"">文字認識を使えなかったため、添付 $($script:OcrSkipped) 件（PDF・画像）の中身を確認できませんでした（$(ConvertTo-HtmlText $script:OcrNote)）。</div>") }
 if ($counts['要注意'] -gt 0) { [void]$sb.Append("<div class=""notice""><b>要注意のメールが $($counts['要注意']) 件あります。</b>添付やリンクを開かず、メール以外の方法（登録済みの電話番号など）で取引先に確認してください。</div>") }
 
 [void]$sb.Append('<div class="cards">')
 [void]$sb.Append("<button class=""card g-wait"" data-filter=""todo""><span class=""n"">$todoCount</span><span class=""l"">対応が必要なもの</span><span class=""d"">OK・対象外以外のすべて</span></button>")
+if ((Get-VendorList).Count -gt 0) {
+    [void]$sb.Append("<button class=""card g-alert"" data-filter=""notlisted""><span class=""n"">$notListedCount</span><span class=""l"">一覧にない業者</span><span class=""d"">業者一覧にない差出人から届いた請求書メール</span></button>")
+}
 [void]$sb.Append("<button class=""card g-miss"" data-filter=""store""><span class=""n"">$storeMissingCount</span><span class=""l"">保管が未のもの</span><span class=""d"">確認の段階に関係なく、請求書のファイルが既定の場所に見つからない</span></button>")
 foreach ($g in $Groups.Keys) {
     [void]$sb.Append("<button class=""card $($Groups[$g].Css)"" data-filter=""$(ConvertTo-HtmlText $g)""><span class=""n"">$($counts[$g])</span><span class=""l"">$(ConvertTo-HtmlText $g)</span><span class=""d"">$(ConvertTo-HtmlText $Groups[$g].Desc)</span></button>")
@@ -1372,11 +1552,13 @@ foreach ($r in $sorted) {
     $css = if ($Groups.Contains($g)) { $Groups[$g].Css } else { 'g-skip' }
     if ($r.確認者) { $stageText = "$($r.対応段階)（$($r.確認者)）" } else { $stageText = $r.対応段階 }
     if (Test-StoreMissing $r) { $sm = '1' } else { $sm = '0' }
-    [void]$sb.Append("<article class=""item $css"" data-group=""$(ConvertTo-HtmlText $g)"" data-store=""$sm"">")
+    if (Test-NotListed $r) { $nl = '1' } else { $nl = '0' }
+    [void]$sb.Append("<article class=""item $css"" data-group=""$(ConvertTo-HtmlText $g)"" data-store=""$sm"" data-notlisted=""$nl"">")
     [void]$sb.Append("<div class=""top""><span class=""badge"">$(ConvertTo-HtmlText $g)</span><span>$(ConvertTo-HtmlText $r.受信日時)</span><span>$(ConvertTo-HtmlText $stageText)</span>")
     if ($r.特定案件) { [void]$sb.Append("<span>$(ConvertTo-HtmlText $spLabel)</span>") }
     if ($r.不備) { [void]$sb.Append('<span>不備</span>') }
     if ($r.種別) { [void]$sb.Append("<span>$(ConvertTo-HtmlText $r.種別)</span>") }
+    if ($nl -eq '1') { [void]$sb.Append('<span style="color:var(--alert);font-weight:700">一覧にない業者</span>') }
     [void]$sb.Append("</div><h3>$(ConvertTo-HtmlText $r.取引先)</h3><p class=""subject"">$(ConvertTo-HtmlText $r.件名)</p>")
     if ($r.やること) { [void]$sb.Append("<p class=""todo"">やること：$(ConvertTo-HtmlText $r.やること)</p>") }
     if ($r.注意) { [void]$sb.Append("<p class=""caution"">注意：$(ConvertTo-HtmlText $r.注意)</p>") }
@@ -1389,7 +1571,7 @@ foreach ($r in $sorted) {
         [void]$sb.Append('</div>')
     }
     [void]$sb.Append('<details><summary>詳しく見る</summary><dl>')
-    foreach ($c in @('請求月', '差出人', '差出人アドレス', '検出根拠', 'コピー先', '格納ファイル', '探したフォルダ', 'コピー元フラグ', '添付ファイル', 'リンク先', '備考', 'Outlookフォルダ')) {
+    foreach ($c in @('請求月', '業者一覧', '差出人', '差出人アドレス', '検出根拠', 'コピー先', '格納ファイル', '探したフォルダ', 'コピー元フラグ', '添付ファイル', 'リンク先', '備考', 'Outlookフォルダ')) {
         $v = [string]$r.$c
         if ($v) { [void]$sb.Append("<dt>$(ConvertTo-HtmlText $c)</dt><dd>$(ConvertTo-HtmlText $v)</dd>") }
     }
@@ -1411,7 +1593,7 @@ foreach ($g in $Groups.Keys) { [void]$sb.Append("<tr><td class=""$($Groups[$g].C
     var t=q.value.trim().toLowerCase(), n=0;
     items.forEach(function(it){
       var g=it.getAttribute('data-group');
-      var okF = cur==='all' || (cur==='todo' ? todo.indexOf(g)>=0 : (cur==='store' ? it.getAttribute('data-store')==='1' : g===cur));
+      var okF = cur==='all' || (cur==='todo' ? todo.indexOf(g)>=0 : (cur==='store' ? it.getAttribute('data-store')==='1' : (cur==='notlisted' ? it.getAttribute('data-notlisted')==='1' : g===cur)));
       var okT = !t || it.textContent.toLowerCase().indexOf(t)>=0;
       it.hidden = !(okF && okT); if(!it.hidden) n++;
     });
@@ -1439,6 +1621,8 @@ foreach ($g in $Groups.Keys) {
     if ($g -eq '要注意') { $color = 'Red' } elseif ($g -eq '漏れあり') { $color = 'Yellow' } elseif ($g -eq 'エラー') { $color = 'Magenta' } elseif ($g -eq 'OK') { $color = 'Green' }
     Write-Host ('  {0} : {1} 件' -f $g, $counts[$g]) -ForegroundColor $color
 }
+if ((Get-VendorList).Count -gt 0) { Write-Host ('  （一覧にない業者 : {0} 件）' -f $notListedCount) -ForegroundColor $(if ($notListedCount) { 'Yellow' } else { 'Gray' }) }
+if ($script:VendorListNote) { Write-Host ('※ ' + $script:VendorListNote) -ForegroundColor Yellow }
 Write-Host ('  （保管が未のもの : {0} 件）' -f $storeMissingCount) -ForegroundColor $(if ($storeMissingCount) { 'Yellow' } else { 'Gray' })
 if ($fatal) {
     Write-Host ''
