@@ -332,17 +332,35 @@ function Get-StoredFeatures {
     return $feat
 }
 
+# 内容で照合 → 一致したファイル（Path）と、一致まではしないが似たファイル（Near：金額か登録番号が一致）
 function Find-ContentMatch {
     param([string]$Feat, $Candidates)
+    $res = [pscustomobject]@{ Path = ''; Near = ''; NearWhy = ''; NoOcr = $false }
     $a = ConvertFrom-Features $Feat
-    if (-not (Test-UsableFeatures $a)) { return '' }
+    if (-not (Test-UsableFeatures $a) -and $a.Amount -le 0 -and $a.Regs.Count -eq 0) { return $res }
     foreach ($c in @($Candidates)) {
         $fs = Get-StoredFeatures $c
-        if ($null -eq $fs) { return '' }   # 文字認識が使えない
+        if ($null -eq $fs) { $res.NoOcr = $true; return $res }   # 文字認識が使えない
         if (-not $fs) { continue }
-        if (Test-SameInvoice $a (ConvertFrom-Features $fs)) { return $c.FullName }
+        $b = ConvertFrom-Features $fs
+        if ((Test-UsableFeatures $a) -and (Test-SameInvoice $a $b)) { $res.Path = $c.FullName; return $res }
+        if (-not $res.Near) {
+            if ($a.Amount -gt 0 -and $a.Amount -eq $b.Amount) { $res.Near = $c.FullName; $res.NearWhy = '金額が一致' }
+            elseif (@($a.Regs | Where-Object { $b.Regs -contains $_ }).Count -gt 0) { $res.Near = $c.FullName; $res.NearWhy = '登録番号が一致' }
+        }
     }
-    return ''
+    return $res
+}
+
+# 読み取った内容を人が読める形に
+function Format-Features {
+    param([string]$Feat)
+    $f = ConvertFrom-Features $Feat
+    $parts = @()
+    if ($f.Regs.Count -gt 0) { $parts += "登録番号 $($f.Regs -join '・')" } else { $parts += '登録番号 読めず' }
+    if ($f.Amount -gt 0) { $parts += ('金額 {0:N0}円' -f $f.Amount) } else { $parts += '金額 読めず' }
+    if ($f.Date) { $parts += "日付 $($f.Date)" } else { $parts += '日付 読めず' }
+    return ($parts -join '／')
 }
 
 function Test-InFolders {
@@ -1292,13 +1310,17 @@ try {
                         # ① 中身が完全に同じファイルを、格納場所全体から探す
                         $hit = Find-ExactAnywhere $tmp
                         $how = '中身が完全に一致'
+                        $near = ''; $nearWhy = ''; $readInfo = ''; $noOcr = $false
                         # ② なければ、内容（登録番号・金額・日付）が同じPDFを探す
                         if (-not $hit -and $Storage.ContentMatch.Enabled -and $Insp.Enabled -and $a.Kind -ne 'ZIP' -and [double]$a.Att.Size -le [double]$Insp.MaxFileMB * 1MB) {
                             $fi = Get-AttachmentFinding $a $received
                             if ($fi.Feat) {
-                                $hit = Find-ContentMatch $fi.Feat (Get-ContentCandidates $months $vendorKeys)
-                                $how = '内容（登録番号・金額・日付）が一致'
+                                $readInfo = Format-Features $fi.Feat
+                                $cm = Find-ContentMatch $fi.Feat (Get-ContentCandidates $months $vendorKeys)
+                                if ($cm.Path) { $hit = $cm.Path; $how = '内容（登録番号・金額・日付）が一致' }
+                                $near = $cm.Near; $nearWhy = $cm.NearWhy; $noOcr = $cm.NoOcr
                             }
+                            elseif (($a.Kind -eq 'PDF' -or $a.Kind -eq '画像') -and -not (Initialize-Ocr)) { $noOcr = $true }
                         }
                         if ($hit) {
                             if ($searchFolders.Count -gt 0 -and (Test-InFolders $hit $searchFolders)) {
@@ -1318,6 +1340,21 @@ try {
                             $r2 = Find-StoredByKeyword $vendorKeys $searchFolders
                             if ($r2.Result -like '済*') { $r = $r2 }
                         }
+                        if ($r.Result -eq '未') {
+                            # 見つからない → 似たファイルがあれば「要確認」にして場所を出す。なければ理由を書く
+                            if ($near) {
+                                $r = [pscustomobject]@{ Result = '要確認'; How = "似たファイルがあります（$nearWhy）。中身を見比べてください"; Path = $near }
+                            } elseif ($searchFolders.Count -gt 0) {
+                                $kv = Find-StoredByKeyword $vendorKeys $searchFolders
+                                if ($kv.Result -like '済*') { $r = [pscustomobject]@{ Result = '要確認'; How = '請求月のフォルダに取引先名入りのファイルがあります。中身を見比べてください'; Path = $kv.Path } }
+                            }
+                            if ($r.Result -eq '未') {
+                                if ($noOcr) { $r.How = '中身が同じファイルは見つかりませんでした（文字認識が使えないため、内容での照合はしていません）' }
+                                elseif ($readInfo) { $r.How = '中身が同じファイルも、内容（登録番号・金額・日付）が同じPDFも見つかりませんでした' }
+                                else { $r.How = '中身が同じファイルは見つかりませんでした（請求書の内容を読み取れなかったため、内容での照合はしていません）' }
+                            }
+                        }
+                        if ($readInfo -and $r.Result -notlike '済*') { $r.How = Join-Notes @($r.How, "メールの請求書から読み取った内容：$readInfo") }
                         $judges += $r.Result
                         if ($a.IsInvoice) { $mark = '（請求書）' } else { $mark = '' }
                         $attDetail += ('{0}{1}：{2}' -f $a.Name, $mark, $r.Result)
