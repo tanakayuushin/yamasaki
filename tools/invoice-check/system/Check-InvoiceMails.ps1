@@ -1480,11 +1480,13 @@ try {
                             else { $lr.How = Join-Notes @($lr.How, '取引先名が分からないため名前では探せませんでした（業者一覧に載ると探せます）') }
                         }
                         if ($lr.Path) { $storePaths += $lr.Path }
-                        if ($judges -contains '済') { $storeJudge = '済' }
-                        elseif ($judges -contains '済(内容一致)') { $storeJudge = '済(内容一致)' }
-                        elseif ($lr.Result -like '済*') { $storeJudge = $lr.Result; $storeNote = Join-Notes @($storeNote, $lr.How) }
-                        elseif ($judges -contains '要確認' -or $lr.Result -eq '要確認') { $storeJudge = '要確認'; $storeNote = Join-Notes @($storeNote, $lr.How) }
-                        else { $storeJudge = '未'; $storeNote = Join-Notes @($storeNote, 'リンク先からダウンロードして格納が必要', $lr.How) }
+                        # リンクから受け取る請求書は、ツールでは確かめきれないので格納は「要確認(リンク)」に固定し、候補を示す
+                        $storeJudge = '要確認(リンク)'
+                        $hint = 'リンクから受け取る請求書のため、格納はExplorerで確認してください'
+                        if ($judges -contains '済' -or $judges -contains '済(内容一致)') { $hint = Join-Notes @($hint, '添付のPDFは格納場所にあります') }
+                        if ($lr.Result -ne '未') { $hint = Join-Notes @($hint, "候補のファイルあり（$($lr.How)）") }
+                        else { $hint = Join-Notes @($hint, '候補のファイルは見つかりませんでした（リンク先からダウンロードして格納が必要かもしれません）', $lr.How) }
+                        $storeNote = Join-Notes @($storeNote, $hint)
                     }
                     else {
                         if ($judges -contains '済') { $storeJudge = '済' }
@@ -1510,13 +1512,14 @@ try {
                         $todo += '1人目の確認待ち'
                     } else {
                         if ($copyJudge -ne '済') { $todo += "コピー($copyJudge)" }
-                        if ($storeJudge -notlike '済*' -and $storeJudge -notlike '不備*') { $todo += "格納($storeJudge)" }
+                        if ($storeJudge -eq '要確認(リンク)') { if ($stage -eq '1人目済') { $todo += '格納をExplorerで確認（リンクの請求書）' } }
+                        elseif ($storeJudge -notlike '済*' -and $storeJudge -notlike '不備*') { $todo += "格納($storeJudge)" }
                         if ($replyJudge -eq '未') { $todo += '受領返信' }
                         if ($copy) {
                             if ($stage -eq '1人目済' -and $copyFlag -eq 'なし') { $todo += 'コピー先を赤旗に' }
                             if ($stage -eq '完了' -and $copyFlag -ne '完了') { $todo += 'コピー先のフラグを完了に' }
                         }
-                        if ($stage -eq '1人目済' -and $todo.Count -eq 0) { $todo += '2人目の確認待ち' }
+                        if ($stage -eq '1人目済' -and @($todo | Where-Object { $_ -ne '格納をExplorerで確認（リンクの請求書）' }).Count -eq 0) { $todo += '2人目の確認待ち' }
                     }
                     if ($warn.Count -gt 0) {
                         if ($bankWord) { $first = '振込先の変更は、メールではなく登録済みの電話番号で取引先に必ず確認' }
@@ -1531,7 +1534,7 @@ try {
                         $todo = @('メールを開いて請求書か確認（請求書でなければ分類項目「対象外」を付ける）')
                     }
                     elseif ($stage -eq '完了' -and $todo.Count -eq 0) { $result = 'OK' }
-                    elseif ($stage -ne '未対応' -and @($todo | Where-Object { $_ -ne '2人目の確認待ち' }).Count -gt 0) { $result = '漏れあり' }
+                    elseif ($stage -ne '未対応' -and @($todo | Where-Object { $_ -ne '2人目の確認待ち' -and $_ -ne '格納をExplorerで確認（リンクの請求書）' }).Count -gt 0) { $result = '漏れあり' }
                     else { $result = '対応待ち' }
 
                     # --- 一覧に追加 ---
@@ -1644,7 +1647,7 @@ function Get-ChipState {
     param([string]$Kind, [string]$Value, [string]$Stage)
     $pending = ($Stage -eq '未対応')
     if ($Kind -eq 'copy')  { if ($Value -eq '済') { return 'ok' }; if ($Value -eq '要確認') { return 'warn' }; if ($pending) { return 'none' }; return 'bad' }
-    if ($Kind -eq 'store') { if ($Value -like '済*') { return 'ok' }; if ($Value -like '不備*' -or $Value -eq '要確認') { return 'warn' }; if ($pending) { return 'none' }; return 'bad' }
+    if ($Kind -eq 'store') { if ($Value -like '済*') { return 'ok' }; if ($Value -like '不備*' -or $Value -like '要確認*') { return 'warn' }; if ($pending) { return 'none' }; return 'bad' }
     if ($Kind -eq 'reply') { if ($Value -like '済*') { return 'ok' }; if ($Value -like '不要*' -or $pending) { return 'none' }; return 'bad' }
     if ($Stage -eq '1人目済') { if ($Value -eq 'なし' -or $Value -eq '-') { return 'bad' }; return 'ok' }
     if ($Stage -eq '完了') { if ($Value -eq '完了') { return 'ok' }; return 'bad' }
@@ -1664,7 +1667,7 @@ function Test-StoreMissing {
     param($Row)
     if (@('対象外', 'エラー', '請求書か要確認') -contains [string]$Row.結果) { return $false }
     $v = [string]$Row.格納
-    return -not ($v -like '済*' -or $v -like '不備*')
+    return -not ($v -like '済*' -or $v -like '不備*' -or $v -eq '要確認(リンク)')
 }
 $storeMissingCount = @($sorted | Where-Object { Test-StoreMissing $_ }).Count
 # 業者一覧にない業者から届いた請求書メール（対象外・エラーは除く）
