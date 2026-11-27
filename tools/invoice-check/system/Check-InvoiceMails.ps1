@@ -316,7 +316,7 @@ function Get-ContentCandidates {
 $script:ContentOcrCount = 0
 function Get-StoredFeatures {
     param($File)
-    $key = 'feat|' + $File.FullName + '|' + $File.Length + '|' + $File.LastWriteTimeUtc.Ticks
+    $key = 'feat2|' + $File.FullName + '|' + $File.Length + '|' + $File.LastWriteTimeUtc.Ticks
     if ($script:InspectCache.ContainsKey($key)) { return [string]$script:InspectCache[$key] }
     if (-not (Initialize-Ocr)) { return $null }
     $feat = ''
@@ -361,6 +361,49 @@ function Format-Features {
     if ($f.Amount -gt 0) { $parts += ('金額 {0:N0}円' -f $f.Amount) } else { $parts += '金額 読めず' }
     if ($f.Date) { $parts += "日付 $($f.Date)" } else { $parts += '日付 読めず' }
     return ($parts -join '／')
+}
+
+# リンクの請求書（金額が分からない場合など）：PDFの中に取引先名があり、請求日がメールの受信日に近いPDFを探す
+function Find-VendorDocMatch {
+    param([string[]]$Keys, $Candidates, [datetime]$Received)
+    $keyNorm = @($Keys | ForEach-Object { ConvertTo-MatchText $_ } | Where-Object { $_ -and $_.Length -ge 2 })
+    if ($keyNorm.Count -eq 0) { return $null }
+    $best = $null; $bestGap = [double]::MaxValue
+    foreach ($c in @($Candidates)) {
+        $fs = Get-StoredFeatures $c
+        if ($null -eq $fs) { return $null }   # 文字認識が使えない
+        if (-not $fs) { continue }
+        $f = ConvertFrom-Features $fs
+        $hitKey = @($f.Vendors | Where-Object { $keyNorm -contains $_ }) | Select-Object -First 1
+        if (-not $hitKey) { continue }
+        $saved = $c.LastWriteTime; if ($c.CreationTime -gt $saved) { $saved = $c.CreationTime }
+        if ($f.Date) {
+            $gap = ([datetime]::ParseExact($f.Date, 'yyyy-MM-dd', $null) - $Received.Date).TotalDays
+            if ($gap -lt -10 -or $gap -gt 3) { continue }   # 請求日が受信日の10日前～3日後
+            $gap = [Math]::Abs($gap)
+        } elseif ($saved -ge $Received.AddDays(-1)) {
+            $gap = 5   # 日付は読めないが、メール受信後に保存されたファイル
+        } else { continue }
+        if ($gap -lt $bestGap) { $best = [pscustomobject]@{ Path = $c.FullName; Key = $hitKey; Date = $f.Date }; $bestGap = $gap }
+    }
+    return $best
+}
+
+# リンクの請求書：ファイル名に取引先名が入ったファイル（メール受信後に保存されたものを優先）
+function Find-LinkFileByName {
+    param([string[]]$Keys, [string[]]$Folders, [datetime]$Received)
+    $keyNorm = @($Keys | ForEach-Object { ConvertTo-MatchText $_ } | Where-Object { $_ -and $_.Length -ge 2 })
+    if ($keyNorm.Count -eq 0 -or @($Folders).Count -eq 0) { return $null }
+    $after = @(); $before = @()
+    foreach ($file in (Get-AllStorageFiles)) {
+        if (-not (Test-InFolders $file.FullName $Folders)) { continue }
+        if (-not (Test-ContainsAny (ConvertTo-MatchText $file.Name) $keyNorm)) { continue }
+        $saved = $file.LastWriteTime; if ($file.CreationTime -gt $saved) { $saved = $file.CreationTime }
+        if ($saved -ge $Received.AddDays(-1)) { $after += $file.FullName } else { $before += $file.FullName }
+    }
+    if ($after.Count -gt 0) { return [pscustomobject]@{ Result = '済(推定)'; How = 'ファイル名に取引先名があり、メール受信後に保存されたファイルあり'; Path = ($after -join ' | ') } }
+    if ($before.Count -gt 0) { return [pscustomobject]@{ Result = '要確認'; How = 'ファイル名に取引先名があるファイルはあるが、メールより前に保存されたもの（前の請求書かもしれません）'; Path = ($before -join ' | ') } }
+    return $null
 }
 
 function Test-InFolders {
@@ -680,15 +723,23 @@ function Get-InvoiceFeatures {
     $d    = Find-InvoiceDate $Text $Received
     $ds = ''
     if ($d) { $ds = $d.ToString('yyyy-MM-dd') }
-    return (($regs -join '|') + ';' + [string]$amt + ';' + $ds)
+    # 中に出てくる業者一覧の会社名（請求書には発行した会社の名前が載っている）
+    $vn = @()
+    foreach ($v in (Get-VendorList)) {
+        if ($v.Core -and $v.Core.Length -ge 3 -and $t.Contains($v.Core)) { $vn += $v.Core }
+        elseif ($v.Core -and $v.Core.Length -ge 2 -and $t.Contains((ConvertTo-MatchText $v.Name))) { $vn += $v.Core }
+    }
+    $vn = @($vn | Select-Object -Unique)
+    return (($regs -join '|') + ';' + [string]$amt + ';' + $ds + ';' + ($vn -join '|'))
 }
 function ConvertFrom-Features {
     param([string]$s)
     $p = ([string]$s) -split ';'
-    $o = [pscustomobject]@{ Regs = @(); Amount = [long]0; Date = '' }
+    $o = [pscustomobject]@{ Regs = @(); Amount = [long]0; Date = ''; Vendors = @() }
     if ($p.Count -ge 1 -and $p[0]) { $o.Regs = @($p[0] -split '\|' | Where-Object { $_ }) }
     if ($p.Count -ge 2 -and $p[1]) { $o.Amount = [long]$p[1] }
     if ($p.Count -ge 3) { $o.Date = [string]$p[2] }
+    if ($p.Count -ge 4 -and $p[3]) { $o.Vendors = @($p[3] -split '\|' | Where-Object { $_ }) }
     return $o
 }
 # 同じ請求書とみなす：金額が一致し、登録番号か日付も一致／または登録番号と日付の両方が一致
@@ -723,7 +774,7 @@ function Get-AttachmentFinding {
     $path = Save-AttTemp $A
     $hash = Get-FileSha256 $path
     $dateKey = "$hash#month"
-    $featKey = "$hash#feat"
+    $featKey = "$hash#feat2"
     if ($script:InspectCache.ContainsKey($hash) -and $script:InspectCache.ContainsKey($dateKey) -and $script:InspectCache.ContainsKey($featKey)) {
         $cm = $null
         if ($script:InspectCache[$dateKey]) { $cm = [datetime]::ParseExact([string]$script:InspectCache[$dateKey], 'yyyy-MM', $null) }
@@ -1413,9 +1464,15 @@ try {
                                 $readMail += '（文字認識が使えないため、格納場所のPDFとの照合はしていません）'
                             }
                         }
+                        if ($lr.Result -eq '未' -and $Storage.ContentMatch.Enabled -and $Insp.Enabled) {
+                            # 金額がなくても：PDFの中に取引先名があり、請求日がメールの受信日に近いもの
+                            $vd = Find-VendorDocMatch $linkKeys (Get-ContentCandidates $months $linkKeys) $received
+                            if ($vd) { $lr = [pscustomobject]@{ Result = '済(推定)'; How = "PDFの中に取引先名（$($vd.Key)）があり、請求日（$($vd.Date)）がメールの受信日に近い"; Path = $vd.Path } }
+                        }
                         if ($lr.Result -eq '未' -and $searchFolders.Count -gt 0) {
-                            $kr = Find-StoredByKeyword $linkKeys $searchFolders
-                            if ($kr.Result -like '済*') { $lr = $kr }
+                            # ファイル名に取引先名：メール受信後に保存 → 済(推定)、それより前だけ → 要確認
+                            $kr = Find-LinkFileByName $linkKeys $searchFolders $received
+                            if ($kr) { $lr = $kr }
                         }
                         if ($readMail) { $lr.How = Join-Notes @($lr.How, "メール本文から読み取った内容：$readMail") }
                         if ($lr.Result -eq '未') {
