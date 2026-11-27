@@ -475,9 +475,48 @@ if (Test-Path -LiteralPath $script:InspectCachePath) {
     } catch { }
 }
 
-# 添付1件の中身に請求書らしさがあるか
+# 請求書に書かれた日付の月（請求月）を読み取る
+#   「請求日」「発行日」などの見出しのすぐ後の日付 → なければ最初の日付。支払期限などの後ろの日付は使わない
+$DatePatterns = @(
+    '(?<![\d\-/.])(?<y>20\d{2})年(?<m>\d{1,2})月(?<d>\d{1,2})日?',
+    '令和(?<r>\d{1,2}|元)年(?<m>\d{1,2})月(?<d>\d{1,2})日?',
+    '(?<![\d\-/.])(?<y>20\d{2})[/.\-](?<m>\d{1,2})[/.\-](?<d>\d{1,2})(?!\d)',
+    '(?<![A-Za-z\d])R(?<r>\d{1,2})[/.\-](?<m>\d{1,2})[/.\-](?<d>\d{1,2})(?!\d)'
+)
+function Find-InvoiceMonth {
+    param([string]$Text, [datetime]$Received)
+    $t = ConvertTo-MatchText $Text
+    if (-not $t) { return $null }
+    $labels   = @($Config.InvoiceDate.Labels | ForEach-Object { ConvertTo-MatchText $_ } | Where-Object { $_ })
+    $excludes = @($Config.InvoiceDate.ExcludeLabels | ForEach-Object { ConvertTo-MatchText $_ } | Where-Object { $_ })
+    $cands = @()
+    foreach ($p in $DatePatterns) {
+        foreach ($m in [regex]::Matches($t, $p)) {
+            if ($m.Groups['y'].Success) { $y = ConvertTo-Int $m.Groups['y'].Value }
+            else {
+                if ($m.Groups['r'].Value -eq '元') { $rr = 1 } else { $rr = ConvertTo-Int $m.Groups['r'].Value }
+                $y = 2018 + $rr
+            }
+            $mo = ConvertTo-Int $m.Groups['m'].Value
+            $d  = ConvertTo-Int $m.Groups['d'].Value
+            if ($y -lt 2000 -or $y -gt 2100 -or $mo -lt 1 -or $mo -gt 12 -or $d -lt 1 -or $d -gt 31) { continue }
+            $dt = (Get-Date -Year $y -Month $mo -Day 1).Date
+            if ([Math]::Abs(($dt - $Received.Date).TotalDays) -gt 400) { continue }   # 受信日から離れすぎた日付は使わない
+            $from = [Math]::Max(0, $m.Index - 12)
+            $ctx = $t.Substring($from, $m.Index - $from)
+            if (Test-ContainsAny $ctx $excludes) { continue }
+            $cands += [pscustomobject]@{ Month = $dt; Pos = $m.Index; Labeled = (Test-ContainsAny $ctx $labels) }
+        }
+    }
+    if ($cands.Count -eq 0) { return $null }
+    $pick = @($cands | Where-Object { $_.Labeled } | Sort-Object Pos) | Select-Object -First 1
+    if (-not $pick) { $pick = @($cands | Sort-Object Pos) | Select-Object -First 1 }
+    return $pick.Month
+}
+
+# 添付1件の中身に請求書らしさがあるか ＋ 請求書の日付の月
 function Get-AttachmentFinding {
-    param($A)
+    param($A, [datetime]$Received = (Get-Date))
     $how = ''
     if ($A.Kind -eq 'PDF') { $how = 'PDFの文字認識' }
     elseif ($A.Kind -eq '画像') { $how = '画像の文字認識' }
@@ -485,8 +524,11 @@ function Get-AttachmentFinding {
     elseif ($A.Kind -eq 'ZIP') { $how = 'ZIPの中のファイル名' }
     $path = Save-AttTemp $A
     $hash = Get-FileSha256 $path
-    if ($script:InspectCache.ContainsKey($hash)) {
-        return [pscustomobject]@{ Found = [string]$script:InspectCache[$hash]; How = $how; Note = '' }
+    $dateKey = "$hash#month"
+    if ($script:InspectCache.ContainsKey($hash) -and $script:InspectCache.ContainsKey($dateKey)) {
+        $cm = $null
+        if ($script:InspectCache[$dateKey]) { $cm = [datetime]::ParseExact([string]$script:InspectCache[$dateKey], 'yyyy-MM', $null) }
+        return [pscustomobject]@{ Found = [string]$script:InspectCache[$hash]; How = $how; Note = ''; Month = $cm }
     }
     $text = ''; $note = ''; $cache = $true
     try {
@@ -500,8 +542,13 @@ function Get-AttachmentFinding {
         $note = '中身を読めませんでした（パスワード付き・壊れたファイルなど）'; $cache = $false
     }
     $found = Find-InvoiceEvidence $text
-    if ($cache) { $script:InspectCache[$hash] = $found }
-    return [pscustomobject]@{ Found = $found; How = $how; Note = $note }
+    $month = $null
+    if ($A.Kind -ne 'ZIP') { $month = Find-InvoiceMonth $text $Received }
+    if ($cache) {
+        $script:InspectCache[$hash] = $found
+        if ($month) { $script:InspectCache[$dateKey] = $month.ToString('yyyy-MM') } else { $script:InspectCache[$dateKey] = '' }
+    }
+    return [pscustomobject]@{ Found = $found; How = $how; Note = $note; Month = $month }
 }
 
 # ---------------------------------------------------------------------------
@@ -615,7 +662,7 @@ function Test-OutlookDisconnected {
 # ---------------------------------------------------------------------------
 # 一覧の列
 # ---------------------------------------------------------------------------
-$Columns = @('結果', 'やること', '受信日時', '取引先', '件名', '差出人', '差出人アドレス', '対応段階', '確認者', '不備', '特定案件',
+$Columns = @('結果', 'やること', '受信日時', '請求月', '取引先', '件名', '差出人', '差出人アドレス', '対応段階', '確認者', '不備', '特定案件',
              '種別', '検出根拠', '注意', 'コピー', 'コピー先', '格納', '格納ファイル', '探したフォルダ', '返信',
              'コピー先フラグ', 'コピー元フラグ', '添付ファイル', 'リンク先', '備考', 'Outlookフォルダ')
 function New-Row {
@@ -760,7 +807,7 @@ try {
                             if ($checked -ge [int]$Insp.MaxAttachmentsPerMail) { break }
                             if ([double]$a.Att.Size -gt [double]$Insp.MaxFileMB * 1MB) { continue }
                             $checked++
-                            $f = Get-AttachmentFinding $a
+                            $f = Get-AttachmentFinding $a ([datetime]$mail.ReceivedTime)
                             if ($f.Note) { $notes += "$($a.Name)：$($f.Note)" }
                             if ($f.Found) { $a.IsInvoice = $true; $reasons += "添付の中身（$($f.How)で$($f.Found)）"; break }
                         }
@@ -774,7 +821,7 @@ try {
                             if ($checked -ge [int]$Insp.MaxAttachmentsPerMail) { break }
                             if ([double]$a.Att.Size -gt [double]$Insp.MaxFileMB * 1MB) { continue }
                             $checked++
-                            $f = Get-AttachmentFinding $a
+                            $f = Get-AttachmentFinding $a ([datetime]$mail.ReceivedTime)
                             if ($f.Found) { $a.IsInvoice = $true }
                         }
                     }
@@ -828,21 +875,6 @@ try {
                     }
 
                     # --- 格納 ---
-                    $months = @(Get-BillingMonths $received "$subject $attNames")
-                    if ($copyMonth -ge 1 -and $copyMonth -le 12) {
-                        # コピー先フォルダの月を最優先
-                        if ($copyMonth -gt $received.Month) { $cy = $received.Year - 1 } else { $cy = $received.Year }
-                        $months = @((Get-Date -Year $cy -Month $copyMonth -Day 1).Date) + @($months | Where-Object { $_.Month -ne $copyMonth })
-                    }
-                    $monthFolders = @(foreach ($mo in $months) { Find-MonthFolders $mo })
-                    if ($isSpecial) { $searchFolders = @(Find-SpecialFolders $monthFolders) } else { $searchFolders = $monthFolders }
-
-                    $storeJudge = '未'; $storeNote = ''; $storePaths = @(); $attDetail = @()
-                    $monthText = (@($months | ForEach-Object { $_.ToString('yyyy/MM') }) -join '・')
-                    if ($searchFolders.Count -eq 0) {
-                        if ($isSpecial -and $monthFolders.Count -gt 0) { $storeNote = "月フォルダの中に $spLabel 用フォルダがない" } else { $storeNote = "推測した月（$monthText）のフォルダがない" }
-                    }
-
                     # 請求書がどう届いたか
                     #   attach … ファイル名か中身で請求書と分かった添付がある → そのファイルがすべて格納されているか
                     #   link   … 分からず、取得用のリンクがある → リンクの請求書（取引先名で推定）。添付のどれかが格納されていても済
@@ -856,6 +888,41 @@ try {
                         if ($files.Count -eq 0) { $files = $atts }
                     }
 
+                    # 請求月 = 請求書に書かれた日付の月（請求書のファイルを文字認識などで読む）
+                    $invMonth = $null
+                    if ($mode -ne 'link' -and $Insp.Enabled) {
+                        foreach ($a in $files) {
+                            if ($a.Kind -eq 'ZIP') { continue }
+                            if ([double]$a.Att.Size -gt [double]$Insp.MaxFileMB * 1MB) { continue }
+                            $fi = Get-AttachmentFinding $a $received
+                            if ($fi.Month) { $invMonth = $fi.Month; break }
+                        }
+                    }
+                    if ($invMonth) {
+                        $months = @($invMonth)
+                        $monthText = $invMonth.ToString('yyyy/MM')
+                        $monthSource = '請求書の日付'
+                        if ($copyMonth -ge 1 -and $copyMonth -ne $invMonth.Month -and -not $isSpecial) {
+                            $copyNote = Join-Notes @($copyNote, "コピー先の「$copyMonth 月分」と請求書の日付の月（$($invMonth.Month)月）が違う")
+                        }
+                    } else {
+                        # 日付を読み取れなければ推測：コピー先フォルダの月 → 件名の「○月分」 → 受信月と前月
+                        $months = @(Get-BillingMonths $received "$subject $attNames")
+                        if ($copyMonth -ge 1 -and $copyMonth -le 12) {
+                            if ($copyMonth -gt $received.Month) { $cy = $received.Year - 1 } else { $cy = $received.Year }
+                            $months = @((Get-Date -Year $cy -Month $copyMonth -Day 1).Date) + @($months | Where-Object { $_.Month -ne $copyMonth })
+                        }
+                        $monthText = (@($months | ForEach-Object { $_.ToString('yyyy/MM') }) -join '・')
+                        $monthSource = '推測（請求書の日付を読み取れず）'
+                    }
+                    $monthFolders = @(foreach ($mo in $months) { Find-MonthFolders $mo })
+                    if ($isSpecial) { $searchFolders = @(Find-SpecialFolders $monthFolders) } else { $searchFolders = $monthFolders }
+
+                    $storeJudge = '未'; $storeNote = ''; $storePaths = @(); $attDetail = @()
+                    if ($searchFolders.Count -eq 0) {
+                        if ($isSpecial -and $monthFolders.Count -gt 0) { $storeNote = "月フォルダの中に $spLabel 用フォルダがない" } else { $storeNote = "請求月（$monthText）のフォルダがない" }
+                    }
+
                     $judges = @()
                     foreach ($a in $files) {
                         $tmp = Save-AttTemp $a
@@ -864,7 +931,10 @@ try {
                         if ($r.Result -ne '済') {
                             # 推測した月のフォルダになければ、受信した年と前の年のほかの月も探す（中身が同じものだけ）
                             $rw = Find-StoredFile $tmp $a.Name (Get-WideFolders $received $isSpecial) -HashOnly
-                            if ($rw.Result -eq '済') { $r = [pscustomobject]@{ Result = '済'; How = "推測した月（$monthText）とは別の月のフォルダにありました"; Path = $rw.Path } }
+                            if ($rw.Result -eq '済') {
+                                if ($invMonth) { $r = [pscustomobject]@{ Result = '要確認'; How = "請求書の日付の月（$monthText）とは別の月のフォルダにありました"; Path = $rw.Path } }
+                                else { $r = [pscustomobject]@{ Result = '済'; How = "推測した月（$monthText）とは別の月のフォルダにありました"; Path = $rw.Path } }
+                            }
                         }
                         if ($r.Result -eq '未' -and $a.Kind -ne 'PDF' -and $searchFolders.Count -gt 0) {
                             # 画像・Excel などは PDF にして格納されることがある → 取引先名で推定
@@ -941,6 +1011,7 @@ try {
                     $row['結果']           = $result
                     $row['やること']       = ($todo -join ' / ')
                     $row['受信日時']       = $received.ToString('yyyy/MM/dd HH:mm')
+                    $row['請求月']         = "$monthText（$monthSource）"
                     if ($vendor) { $row['取引先'] = [string]$vendor.Name } else { $row['取引先'] = $senderNm }
                     $row['件名']           = $subject
                     $row['差出人']         = $senderNm
@@ -1149,7 +1220,7 @@ foreach ($r in $sorted) {
         [void]$sb.Append('</div>')
     }
     [void]$sb.Append('<details><summary>詳しく見る</summary><dl>')
-    foreach ($c in @('差出人', '差出人アドレス', '検出根拠', 'コピー先', '格納ファイル', '探したフォルダ', 'コピー元フラグ', '添付ファイル', 'リンク先', '備考', 'Outlookフォルダ')) {
+    foreach ($c in @('請求月', '差出人', '差出人アドレス', '検出根拠', 'コピー先', '格納ファイル', '探したフォルダ', 'コピー元フラグ', '添付ファイル', 'リンク先', '備考', 'Outlookフォルダ')) {
         $v = [string]$r.$c
         if ($v) { [void]$sb.Append("<dt>$(ConvertTo-HtmlText $c)</dt><dd>$(ConvertTo-HtmlText $v)</dd>") }
     }
